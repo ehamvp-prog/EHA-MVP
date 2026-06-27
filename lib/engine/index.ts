@@ -13,6 +13,7 @@ import { capacityFromAirSide } from "./capacity"
 import { computeEfficiency } from "./seer2"
 import { extractHvacInputs, type LatestDevice } from "./extract"
 import { deriveCoilState, type CoilState } from "./coil-state"
+import { computeCost, type TouPeriod, type Season } from "./cost"
 
 export interface SystemProfileInputs {
   system_tonnage?: number | null
@@ -51,6 +52,12 @@ export interface ComputedReading {
 
   // Derived live state (never set by hand)
   coil_state: CoilState
+
+  // Live Evergy RTOU cost (tariff energy only; riders excluded)
+  tou_season: Season
+  tou_period: TouPeriod
+  rate_per_kwh: number
+  cost_per_hour: number | null
 
   // Pressure actually used for psychrometrics (live, internal)
   barometric_pressure_inhg: number | null
@@ -121,6 +128,10 @@ export function runEngine(
     profile?.seer2_conversion_factor,
   )
 
+  // Live electricity cost rate from the Evergy RTOU tariff, based on the
+  // reading's CST timestamp and the current total power draw.
+  const cost = computeCost(eff.totalWatts, readingAt)
+
   return {
     reading_at: readingAt,
     return_temp_f: inputs.returnTempF,
@@ -142,6 +153,12 @@ export function runEngine(
     measured_seer2_estimate: eff.measuredSeer2Estimate,
 
     coil_state: coil.state,
+
+    tou_season: cost.season,
+    tou_period: cost.tou_period,
+    rate_per_kwh: cost.rate_per_kwh,
+    cost_per_hour: cost.cost_per_hour,
+
     barometric_pressure_inhg: liveP,
 
     diagnostics: {
