@@ -57,6 +57,12 @@ export function Dashboard() {
             </span>
           </div>
           <Link
+            href="/setup"
+            className="text-xs font-medium text-muted hover:text-foreground"
+          >
+            Setup
+          </Link>
+          <Link
             href="/status"
             className="text-xs font-medium text-muted hover:text-foreground"
           >
