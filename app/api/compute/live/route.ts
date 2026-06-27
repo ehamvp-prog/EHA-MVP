@@ -46,18 +46,43 @@ export async function GET() {
     }
     const devices = Array.from(latestByDevice.values())
 
-    // Pull live outdoor pressure (internal) from the home's saved lat/lon.
-    // This replaces the old hand-entered barometric anchor.
+    // Pull live outdoor conditions (internal) from the home's saved lat/lon.
+    // These replace the old hand-entered barometric anchor AND feed the
+    // anomaly layer (outdoor-temperature conditioning + confidence weighting).
     let liveBarometricInHg: number | null = null
+    let outdoorTempF: number | null = null
+    let weatherConfidence: "high" | "medium" | "low" | null = null
     const lat = (profile as { weather_lat?: number | null } | null)?.weather_lat
     const lon = (profile as { weather_lon?: number | null } | null)?.weather_lon
     if (typeof lat === "number" && typeof lon === "number") {
       const weather = await getWeatherByLatLon(lat, lon)
-      if (weather.ok) liveBarometricInHg = weather.outdoor_pressure_inhg
+      if (weather.ok) {
+        liveBarometricInHg = weather.outdoor_pressure_inhg
+        outdoorTempF = weather.outdoor_temp_f
+        weatherConfidence = weather.weather_confidence
+      }
     }
+
+    // Rolling healthy baseline: recent computed readings with a usable EER.
+    // The engine bins these by outdoor temperature near the current value.
+    const { data: history } = await supabase
+      .from("computed_readings")
+      .select("outdoor_temp_f, live_eer")
+      .eq("site_id", SITE_ID)
+      .not("live_eer", "is", null)
+      .order("reading_at", { ascending: false })
+      .limit(2000)
+
+    const baselineSamples = (history ?? []).map((h) => ({
+      outdoorTempF: h.outdoor_temp_f as number | null,
+      liveEer: h.live_eer as number | null,
+    }))
 
     const result = runEngine(devices, (profile as SystemProfileInputs) ?? null, {
       liveBarometricInHg,
+      outdoorTempF,
+      weatherConfidence,
+      baselineSamples,
     })
 
     return NextResponse.json({

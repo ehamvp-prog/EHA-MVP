@@ -14,6 +14,12 @@ import { computeEfficiency } from "./seer2"
 import { extractHvacInputs, type LatestDevice } from "./extract"
 import { deriveCoilState, type CoilState } from "./coil-state"
 import { computeCost, type TouPeriod, type Season } from "./cost"
+import {
+  assessAnomaly,
+  type EfficiencyColor,
+  type BaselineSample,
+  type WeatherConfidence,
+} from "./anomaly"
 
 export interface SystemProfileInputs {
   system_tonnage?: number | null
@@ -62,6 +68,13 @@ export interface ComputedReading {
   // Pressure actually used for psychrometrics (live, internal)
   barometric_pressure_inhg: number | null
 
+  // Outdoor conditions used for anomaly conditioning (internal, live)
+  outdoor_temp_f: number | null
+  weather_confidence: WeatherConfidence
+
+  // Anomaly Color Layer verdict
+  efficiency_color: EfficiencyColor
+
   // Engine diagnostics (not persisted unless desired)
   diagnostics: {
     ratedCfm: number | null
@@ -73,6 +86,11 @@ export interface ComputedReading {
     ratedSeer2: number | null
     coilStateNote: string
     pressureSource: string
+    anomalyNote: string
+    anomalyDeviationPct: number | null
+    anomalyBaselineEer: number | null
+    anomalyBaselineSamples: number
+    anomalyCapped: boolean
     matched: ReturnType<typeof extractHvacInputs>["matched"]
   }
 }
@@ -81,6 +99,11 @@ export interface EngineOptions {
   // Live barometric pressure (inHg) from the outdoor weather lookup. This is
   // derived internally — never typed in by an installer.
   liveBarometricInHg?: number | null
+  // Live outdoor conditions (internal) used for anomaly conditioning.
+  outdoorTempF?: number | null
+  weatherConfidence?: WeatherConfidence
+  // Rolling history (already temp-paired) for the healthy baseline.
+  baselineSamples?: BaselineSample[]
   readingAt?: string
 }
 
@@ -132,6 +155,18 @@ export function runEngine(
   // reading's CST timestamp and the current total power draw.
   const cost = computeCost(eff.totalWatts, readingAt)
 
+  // Anomaly Color Layer: compare live EER to the temp-conditioned healthy
+  // baseline, weighted by how trustworthy the outdoor data is.
+  const outdoorTempF = options.outdoorTempF ?? null
+  const weatherConfidence = options.weatherConfidence ?? null
+  const anomaly = assessAnomaly({
+    liveEer: eff.liveEer,
+    totalWatts: eff.totalWatts,
+    outdoorTempF,
+    weatherConfidence,
+    baseline: options.baselineSamples ?? [],
+  })
+
   return {
     reading_at: readingAt,
     return_temp_f: inputs.returnTempF,
@@ -161,6 +196,11 @@ export function runEngine(
 
     barometric_pressure_inhg: liveP,
 
+    outdoor_temp_f: outdoorTempF,
+    weather_confidence: weatherConfidence,
+
+    efficiency_color: anomaly.color,
+
     diagnostics: {
       ratedCfm: airflow.ratedCfm,
       staticFlag: airflow.staticFlag,
@@ -171,6 +211,11 @@ export function runEngine(
       ratedSeer2: profile?.rated_seer2 ?? null,
       coilStateNote: coil.note,
       pressureSource,
+      anomalyNote: anomaly.note,
+      anomalyDeviationPct: anomaly.deviationPct,
+      anomalyBaselineEer: anomaly.baselineEer,
+      anomalyBaselineSamples: anomaly.baselineSampleCount,
+      anomalyCapped: anomaly.capped,
       matched: inputs.matched,
     },
   }
