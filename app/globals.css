@@ -1,0 +1,70 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+
+  --color-background: #07090d;
+  --color-foreground: #e8eef6;
+  --color-card: #0e131b;
+  --color-card-foreground: #e8eef6;
+  --color-elevated: #131a24;
+  --color-border: #1d2531;
+  --color-muted: #7e8a9a;
+  --color-muted-foreground: #9aa6b6;
+
+  --color-primary: #34d3bf;
+  --color-primary-foreground: #022019;
+
+  --color-accent: #4aa3ff;
+  --color-accent-foreground: #021326;
+
+  /* gauge / state colors */
+  --color-ok: #29d17e;
+  --color-warn: #f5b13d;
+  --color-orange: #f5803d;
+  --color-bad: #ef4757;
+
+  /* chrome bezel gradient stops */
+  --chrome-0: #2b3543;
+  --chrome-1: #5a6878;
+  --chrome-2: #aab6c6;
+  --chrome-3: #4a5867;
+  --chrome-4: #20283450;
+
+  --radius: 0.85rem;
+}
+
+html {
+  background-color: var(--color-background);
+  color-scheme: dark;
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  background-image:
+    radial-gradient(900px 600px at 80% -10%, rgba(74, 163, 255, 0.06), transparent 60%),
+    radial-gradient(700px 500px at 0% 0%, rgba(52, 211, 191, 0.05), transparent 55%);
+  background-attachment: fixed;
+}
+
+/* polished chrome bezel ring used by gauges and tiles */
+.chrome-bezel {
+  background:
+    conic-gradient(
+      from 140deg,
+      var(--chrome-3),
+      var(--chrome-2),
+      var(--chrome-0),
+      var(--chrome-2),
+      var(--chrome-3)
+    );
+}
+
+.glow-ok { filter: drop-shadow(0 0 6px rgba(41, 209, 126, 0.55)); }
+.glow-warn { filter: drop-shadow(0 0 6px rgba(245, 177, 61, 0.55)); }
+.glow-orange { filter: drop-shadow(0 0 6px rgba(245, 128, 61, 0.55)); }
+.glow-bad { filter: drop-shadow(0 0 6px rgba(239, 71, 87, 0.6)); }
+.glow-primary { filter: drop-shadow(0 0 6px rgba(52, 211, 191, 0.55)); }
+.glow-accent { filter: drop-shadow(0 0 6px rgba(74, 163, 255, 0.5)); }
