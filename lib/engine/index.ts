@@ -18,6 +18,7 @@ export interface SystemProfileInputs {
   cfm_per_ton?: number | null
   barometric_pressure_inhg?: number | null
   blower_type?: string | null
+  blower_model?: string | null
   ecm_profile?: string | null
   blower_speed_tap?: string | null
   equipment_class?: string | null
@@ -52,6 +53,7 @@ export interface ComputedReading {
   diagnostics: {
     ratedCfm: number | null
     staticFlag: string
+    generalizedModel: boolean
     airflowNote: string
     seer2FactorUsed: number
     seer2FactorSource: string
@@ -79,6 +81,7 @@ export function runEngine(
     tonnage: profile?.system_tonnage,
     cfmPerTon: profile?.cfm_per_ton,
     blowerType: profile?.blower_type,
+    blowerModel: profile?.blower_model,
     ecmProfile: profile?.ecm_profile,
     blowerSpeedTap: profile?.blower_speed_tap,
   })
@@ -115,6 +118,7 @@ export function runEngine(
     diagnostics: {
       ratedCfm: airflow.ratedCfm,
       staticFlag: airflow.staticFlag,
+      generalizedModel: airflow.generalizedModel,
       airflowNote: airflow.note,
       seer2FactorUsed: eff.seer2FactorUsed,
       seer2FactorSource: eff.seer2FactorSource,

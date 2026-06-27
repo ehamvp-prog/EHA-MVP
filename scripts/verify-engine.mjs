@@ -40,3 +40,16 @@ console.log("[v0] capacity         :", Q.toFixed(0), "BTU/hr (expect ~32,700)")
 console.log("[v0] tons             :", (Q / 12000).toFixed(2), "tons")
 console.log("[v0] live EER         :", eer.toFixed(2))
 console.log("[v0] measured SEER2   :", seer2.toFixed(2), "(EER x 0.95)")
+
+// --- Generalized blower curve check (3-ton, 400 cfm/ton => 1200 @ 0.5") ---
+function curve(rated, staticInWc) {
+  const steps = (staticInWc - 0.5) / 0.1
+  const slope = steps >= 0 ? 0.1 : 0.08
+  const factor = Math.min(1.6, Math.max(0.4, 1 - slope * steps))
+  return rated * factor
+}
+const rated = 1200
+console.log("\n[v0] --- blower curve ---")
+console.log("[v0] @0.5\" WC:", curve(rated, 0.5).toFixed(0), "CFM (expect 1200)")
+console.log("[v0] @0.7\" WC:", curve(rated, 0.7).toFixed(0), "CFM (expect ~960)")
+console.log("[v0] @0.3\" WC:", curve(rated, 0.3).toFixed(0), "CFM (expect ~1380)")
