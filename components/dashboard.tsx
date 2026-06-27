@@ -5,6 +5,7 @@ import Link from "next/link"
 import { DeviceCard } from "./device-card"
 import { WeatherPanel } from "./weather-panel"
 import { HistoryFeed } from "./history-feed"
+import { PerformancePanel } from "./performance-panel"
 import { freshness } from "@/lib/telemetry-format"
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
@@ -42,7 +43,7 @@ export function Dashboard() {
         <div>
           <p className="font-mono text-xs uppercase tracking-[0.2em] text-primary">Elevate Home App</p>
           <h1 className="text-2xl font-semibold tracking-tight text-foreground text-balance">
-            Live Telemetry
+            System Dashboard
           </h1>
         </div>
         <div className="flex items-center gap-4">
@@ -70,6 +71,11 @@ export function Dashboard() {
           </Link>
         </div>
       </header>
+
+      {/* Performance — the live efficiency engine output */}
+      <div className="mb-6">
+        <PerformancePanel />
+      </div>
 
       {/* Weather */}
       <div className="mb-6">
@@ -112,7 +118,7 @@ export function Dashboard() {
       <HistoryFeed rows={history} />
 
       <p className="mt-6 text-center text-xs text-muted">
-        Phase 1 · Sensor &amp; Weather Ingest · updates every 5 seconds
+        Elevate Home App · live efficiency, cost &amp; health · updates every 5 seconds
       </p>
     </main>
   )
