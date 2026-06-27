@@ -11,8 +11,6 @@ import { createAdminClient } from "@/lib/supabase/admin"
 //   3. Save the WHOLE body, untouched, into the `telemetry` table.
 //
 // It does NOT do any HVAC math. It just stores raw readings.
-// Note: DS18B20 data is stored here but is NOT used in efficiency math
-// later, per the MVP spec.
 // =====================================================================
 
 export const dynamic = "force-dynamic"
