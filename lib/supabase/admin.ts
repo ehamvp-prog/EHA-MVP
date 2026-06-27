@@ -1,10 +1,14 @@
-import { createClient as createSupabaseClient } from "@supabase/supabase-js"
+import { createClient as createSupabaseClient, type SupabaseClient } from "@supabase/supabase-js"
 
 // Admin client — uses the SERVICE ROLE key. This bypasses RLS.
 // NEVER import this in client/browser code. Server-only.
 // This is what writes telemetry and computed_readings, and reads
 // data back for the owner-only dashboard (no login by design).
-let adminSingleton: ReturnType<typeof createSupabaseClient> | null = null
+//
+// Typed as a default (untyped-schema) SupabaseClient. Using
+// `ReturnType<typeof createSupabaseClient>` instead collapses every table
+// row type to `never`, which breaks all .select()/.insert() calls.
+let adminSingleton: SupabaseClient | null = null
 
 export function createAdminClient() {
   if (adminSingleton) return adminSingleton

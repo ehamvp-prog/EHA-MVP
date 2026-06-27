@@ -45,7 +45,10 @@ export async function POST() {
       .order("reading_at", { ascending: false })
       .limit(1)
 
-    const last = lastRows?.[0] ?? null
+    // Explicitly type the row shape: the untyped Supabase client otherwise
+    // infers `never` for the selected columns, which breaks .reading_at below.
+    const last =
+      (lastRows?.[0] as { reading_at: string; accumulated_cost: number | null } | undefined) ?? null
     const now = Date.now()
     if (last) {
       const sinceSec = (now - new Date(last.reading_at).getTime()) / 1000
