@@ -8,8 +8,10 @@ export const dynamic = "force-dynamic"
 const TEXT_FIELDS = [
   "condenser_make",
   "condenser_model",
+  "condenser_serial",
   "evaporator_coil_model",
   "metering_type",
+  "equipment_class",
   "blower_type",
   "blower_model",
   "blower_speed_tap",
@@ -18,7 +20,7 @@ const TEXT_FIELDS = [
   "weather_station_id",
 ] as const
 
-const NUM_FIELDS = ["system_tonnage", "barometric_pressure_inhg"] as const
+const NUM_FIELDS = ["system_tonnage", "barometric_pressure_inhg", "rated_seer2"] as const
 
 // GET: read the full installer profile for this home.
 export async function GET(request: Request) {

@@ -99,8 +99,11 @@ const FIELD_KEYS = [
   "system_tonnage",
   "condenser_make",
   "condenser_model",
+  "condenser_serial",
   "evaporator_coil_model",
   "metering_type",
+  "rated_seer2",
+  "equipment_class",
   "blower_type",
   "blower_model",
   "blower_speed_tap",
@@ -213,6 +216,14 @@ export function InstallerSetup() {
             onChange={set}
           />
           <Field
+            label="Condenser serial number"
+            hint="The serial number on the outdoor unit's rating plate. Used for service records."
+            name="condenser_serial"
+            placeholder="e.g. 1234A5678"
+            value={v("condenser_serial")}
+            onChange={set}
+          />
+          <Field
             label="Evaporator coil model"
             hint="The matched indoor coil model number."
             name="evaporator_coil_model"
@@ -314,6 +325,36 @@ export function InstallerSetup() {
             placeholder="e.g. KICT"
             value={v("weather_station_id")}
             onChange={set}
+          />
+        </Section>
+
+        <Section
+          title="Rated Efficiency"
+          blurb="The manufacturer's lab ratings. The app uses these as a reference and a sanity check, then shows your real measured performance against them."
+        >
+          <Field
+            label="Rated SEER2 (nameplate)"
+            hint="The SEER2 number from the manufacturer's spec sheet or AHRI certificate. This is the lab rating, not the live measured value."
+            name="rated_seer2"
+            type="number"
+            unit="SEER2"
+            placeholder="e.g. 15.2"
+            value={v("rated_seer2")}
+            onChange={set}
+          />
+          <Select
+            label="Equipment class"
+            hint="The type of system. This sets how the live measurement is converted to a SEER2-equivalent estimate."
+            name="equipment_class"
+            value={v("equipment_class")}
+            onChange={set}
+            options={[
+              { value: "standard_split", label: "Standard split system" },
+              { value: "two_stage_split", label: "Two-stage split system" },
+              { value: "variable_speed_inverter", label: "Variable-speed / inverter" },
+              { value: "packaged_unit", label: "Packaged unit" },
+              { value: "heat_pump", label: "Heat pump (cooling mode)" },
+            ]}
           />
         </Section>
 
