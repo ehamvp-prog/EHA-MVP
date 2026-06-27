@@ -20,7 +20,13 @@ const TEXT_FIELDS = [
   "weather_station_id",
 ] as const
 
-const NUM_FIELDS = ["system_tonnage", "barometric_pressure_inhg", "rated_seer2"] as const
+const NUM_FIELDS = [
+  "system_tonnage",
+  "barometric_pressure_inhg",
+  "rated_seer2",
+  "cfm_per_ton",
+  "seer2_conversion_factor",
+] as const
 
 // GET: read the full installer profile for this home.
 export async function GET(request: Request) {

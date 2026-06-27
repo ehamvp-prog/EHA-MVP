@@ -103,12 +103,14 @@ const FIELD_KEYS = [
   "evaporator_coil_model",
   "metering_type",
   "rated_seer2",
+  "seer2_conversion_factor",
   "equipment_class",
   "blower_type",
   "blower_model",
   "blower_speed_tap",
   "ecm_profile",
   "coil_state",
+  "cfm_per_ton",
   "barometric_pressure_inhg",
   "weather_zip",
   "weather_station_id",
@@ -294,6 +296,16 @@ export function InstallerSetup() {
               { value: "dry", label: "Dry (not removing humidity)" },
             ]}
           />
+          <Field
+            label="Airflow per ton (CFM/ton)"
+            hint="Design airflow for this blower. 400 is the common rule of thumb; 350 is typical for high-humidity setups. Used as the airflow baseline."
+            name="cfm_per_ton"
+            type="number"
+            unit="CFM/ton"
+            placeholder="e.g. 400"
+            value={v("cfm_per_ton")}
+            onChange={set}
+          />
         </Section>
 
         <Section
@@ -355,6 +367,15 @@ export function InstallerSetup() {
               { value: "packaged_unit", label: "Packaged unit" },
               { value: "heat_pump", label: "Heat pump (cooling mode)" },
             ]}
+          />
+          <Field
+            label="SEER2 conversion factor (optional)"
+            hint="Leave blank to use the default for the equipment class. Enter a number to fine-tune how live EER becomes the Measured SEER2 Estimate."
+            name="seer2_conversion_factor"
+            type="number"
+            placeholder="e.g. 0.95"
+            value={v("seer2_conversion_factor")}
+            onChange={set}
           />
         </Section>
 
