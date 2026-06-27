@@ -55,6 +55,15 @@ export async function geocodeZip(
   }
 }
 
+// Standard-atmosphere station pressure (inHg) for a given elevation (meters).
+// Used as a fallback ONLY when a live observation has no barometric reading.
+// p = 29.92 * (1 - 2.25577e-5 * h)^5.25588
+export function pressureFromElevationM(elevationM: number | null): number | null {
+  if (elevationM == null || !Number.isFinite(elevationM)) return null
+  const p = 29.92 * Math.pow(1 - 2.25577e-5 * elevationM, 5.25588)
+  return Math.round(p * 100) / 100
+}
+
 function confidenceFromAge(ageMin: number | null): "high" | "medium" | "low" {
   if (ageMin == null) return "low"
   if (ageMin <= 75) return "high"
@@ -96,6 +105,11 @@ export async function getWeatherByLatLon(lat: number, lon: number): Promise<Weat
     const station = stations?.features?.[0]
     const stationId: string | undefined = station?.properties?.stationIdentifier
     if (!stationId) return { ...empty, error: "No usable station found" }
+    // Station elevation (meters) — used for the pressure fallback below.
+    const stationElevationM: number | null =
+      typeof station?.properties?.elevation?.value === "number"
+        ? station.properties.elevation.value
+        : null
 
     // 3) latest observation
     const obsRes = await fetch(
@@ -108,7 +122,11 @@ export async function getWeatherByLatLon(lat: number, lon: number): Promise<Weat
 
     const tempF = cToF(p.temperature?.value ?? null)
     const rh = p.relativeHumidity?.value != null ? Math.round(p.relativeHumidity.value) : null
-    const pressureInHg = paToInHg(p.barometricPressure?.value ?? p.seaLevelPressure?.value ?? null)
+    // Prefer the live observed station pressure; if absent, derive it from
+    // the station's elevation using the standard atmosphere. Both are internal.
+    const pressureInHg =
+      paToInHg(p.barometricPressure?.value ?? p.seaLevelPressure?.value ?? null) ??
+      pressureFromElevationM(stationElevationM)
     const obsTimestamp: string | null = p.timestamp ?? null
     const ageMin =
       obsTimestamp != null

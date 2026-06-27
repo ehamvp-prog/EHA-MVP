@@ -109,11 +109,8 @@ const FIELD_KEYS = [
   "blower_model",
   "blower_speed_tap",
   "ecm_profile",
-  "coil_state",
   "cfm_per_ton",
-  "barometric_pressure_inhg",
   "weather_zip",
-  "weather_station_id",
 ] as const
 
 export function InstallerSetup() {
@@ -285,17 +282,6 @@ export function InstallerSetup() {
             value={v("ecm_profile")}
             onChange={set}
           />
-          <Select
-            label="Coil state"
-            hint="Wet coil means the system is actively cooling and pulling humidity. Dry coil means it isn't."
-            name="coil_state"
-            value={v("coil_state")}
-            onChange={set}
-            options={[
-              { value: "wet", label: "Wet (cooling, removing humidity)" },
-              { value: "dry", label: "Dry (not removing humidity)" },
-            ]}
-          />
           <Field
             label="Airflow per ton (CFM/ton)"
             hint="Design airflow for this blower. 400 is the common rule of thumb; 350 is typical for high-humidity setups. Used as the airflow baseline."
@@ -309,33 +295,15 @@ export function InstallerSetup() {
         </Section>
 
         <Section
-          title="Location & Weather"
-          blurb="Where this home is, so we can pull the right outdoor conditions and air pressure."
+          title="Location"
+          blurb="Just the ZIP code for this home. The app finds the nearest official weather station and pulls live outdoor conditions and air pressure on its own."
         >
           <Field
-            label="Barometric pressure anchor"
-            hint="Local air pressure in inches of mercury (inHg). Used when live pressure isn't available. Sea level is about 29.92."
-            name="barometric_pressure_inhg"
-            type="number"
-            unit="inHg"
-            placeholder="e.g. 29.92"
-            value={v("barometric_pressure_inhg")}
-            onChange={set}
-          />
-          <Field
             label="Home ZIP code"
-            hint="Used to find the nearest official weather station."
+            hint="Used to find the nearest official weather station automatically."
             name="weather_zip"
             placeholder="e.g. 67202"
             value={v("weather_zip")}
-            onChange={set}
-          />
-          <Field
-            label="Weather station ID (optional)"
-            hint="If you know a specific nearby station, enter its ID. Otherwise the nearest one is used."
-            name="weather_station_id"
-            placeholder="e.g. KICT"
-            value={v("weather_station_id")}
             onChange={set}
           />
         </Section>

@@ -9,6 +9,7 @@ import { NextResponse } from "next/server"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { runEngine, type SystemProfileInputs } from "@/lib/engine"
 import type { LatestDevice } from "@/lib/engine/extract"
+import { getWeatherByLatLon } from "@/lib/weather"
 
 export const dynamic = "force-dynamic"
 
@@ -45,7 +46,19 @@ export async function GET() {
     }
     const devices = Array.from(latestByDevice.values())
 
-    const result = runEngine(devices, (profile as SystemProfileInputs) ?? null)
+    // Pull live outdoor pressure (internal) from the home's saved lat/lon.
+    // This replaces the old hand-entered barometric anchor.
+    let liveBarometricInHg: number | null = null
+    const lat = (profile as { weather_lat?: number | null } | null)?.weather_lat
+    const lon = (profile as { weather_lon?: number | null } | null)?.weather_lon
+    if (typeof lat === "number" && typeof lon === "number") {
+      const weather = await getWeatherByLatLon(lat, lon)
+      if (weather.ok) liveBarometricInHg = weather.outdoor_pressure_inhg
+    }
+
+    const result = runEngine(devices, (profile as SystemProfileInputs) ?? null, {
+      liveBarometricInHg,
+    })
 
     return NextResponse.json({
       ok: true,

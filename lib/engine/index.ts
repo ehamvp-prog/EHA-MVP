@@ -12,11 +12,11 @@ import { deriveAirflow, type AirflowConfidence } from "./airflow"
 import { capacityFromAirSide } from "./capacity"
 import { computeEfficiency } from "./seer2"
 import { extractHvacInputs, type LatestDevice } from "./extract"
+import { deriveCoilState, type CoilState } from "./coil-state"
 
 export interface SystemProfileInputs {
   system_tonnage?: number | null
   cfm_per_ton?: number | null
-  barometric_pressure_inhg?: number | null
   blower_type?: string | null
   blower_model?: string | null
   ecm_profile?: string | null
@@ -49,6 +49,12 @@ export interface ComputedReading {
   live_eer: number | null
   measured_seer2_estimate: number | null
 
+  // Derived live state (never set by hand)
+  coil_state: CoilState
+
+  // Pressure actually used for psychrometrics (live, internal)
+  barometric_pressure_inhg: number | null
+
   // Engine diagnostics (not persisted unless desired)
   diagnostics: {
     ratedCfm: number | null
@@ -58,23 +64,43 @@ export interface ComputedReading {
     seer2FactorUsed: number
     seer2FactorSource: string
     ratedSeer2: number | null
+    coilStateNote: string
+    pressureSource: string
     matched: ReturnType<typeof extractHvacInputs>["matched"]
   }
+}
+
+export interface EngineOptions {
+  // Live barometric pressure (inHg) from the outdoor weather lookup. This is
+  // derived internally — never typed in by an installer.
+  liveBarometricInHg?: number | null
+  readingAt?: string
 }
 
 export function runEngine(
   devices: LatestDevice[],
   profile: SystemProfileInputs | null,
-  readingAt: string = new Date().toISOString(),
+  options: EngineOptions = {},
 ): ComputedReading {
+  const readingAt = options.readingAt ?? new Date().toISOString()
   const inputs = extractHvacInputs(devices)
 
-  // Barometric pressure: required for psychrometrics. Profile anchor only
-  // (no pressure sensor in the air stream).
-  const pInHg = profile?.barometric_pressure_inhg ?? null
+  // Barometric pressure: required for psychrometrics. Comes from the live
+  // outdoor observation (internal). Falls back to the standard sea-level
+  // value so the math can still run if weather is briefly unavailable.
+  const liveP = options.liveBarometricInHg ?? null
+  const pInHg = liveP ?? 29.92
+  const pressureSource = liveP != null ? "live_observation" : "standard_fallback"
 
   const returnState = moistAirState(inputs.returnTempF, inputs.returnRh, pInHg)
   const supplyState = moistAirState(inputs.supplyTempF, inputs.supplyRh, pInHg)
+
+  const coil = deriveCoilState({
+    condenserWattsLeg1: inputs.condenserWattsLeg1,
+    condenserWattsLeg2: inputs.condenserWattsLeg2,
+    returnRh: inputs.returnRh,
+    supplyRh: inputs.supplyRh,
+  })
 
   const airflow = deriveAirflow({
     staticInWc: inputs.staticInWc,
@@ -115,6 +141,9 @@ export function runEngine(
     live_eer: eff.liveEer,
     measured_seer2_estimate: eff.measuredSeer2Estimate,
 
+    coil_state: coil.state,
+    barometric_pressure_inhg: liveP,
+
     diagnostics: {
       ratedCfm: airflow.ratedCfm,
       staticFlag: airflow.staticFlag,
@@ -123,6 +152,8 @@ export function runEngine(
       seer2FactorUsed: eff.seer2FactorUsed,
       seer2FactorSource: eff.seer2FactorSource,
       ratedSeer2: profile?.rated_seer2 ?? null,
+      coilStateNote: coil.note,
+      pressureSource,
       matched: inputs.matched,
     },
   }

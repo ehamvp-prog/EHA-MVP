@@ -16,13 +16,10 @@ const TEXT_FIELDS = [
   "blower_model",
   "blower_speed_tap",
   "ecm_profile",
-  "coil_state",
-  "weather_station_id",
 ] as const
 
 const NUM_FIELDS = [
   "system_tonnage",
-  "barometric_pressure_inhg",
   "rated_seer2",
   "cfm_per_ton",
   "seer2_conversion_factor",
