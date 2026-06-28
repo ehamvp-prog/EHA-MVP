@@ -36,16 +36,16 @@ function money(n: number | null | undefined, digits = 2): string {
 // ---- Plain-language translators -------------------------------------------
 
 // Friendly top-of-screen system status (emojis requested for this headline).
-function systemStatus(c: Computed | undefined): { title: string; tone: string } {
-  if (!c) return { title: "Connecting to your system…", tone: "text-muted-foreground" }
+function systemStatus(c: Computed | undefined): { title: string; tone: string; dot: string } {
+  if (!c) return { title: "Connecting to your system…", tone: "text-muted-foreground", dot: "bg-muted" }
   const hardFault = c.sensor_faults?.some((f) => f.severity === "fault")
   if (c.system_state === "fault" && hardFault)
-    return { title: "Something looks off — tap for details 🟠", tone: "text-orange" }
+    return { title: "Something looks off — tap for details", tone: "text-warn", dot: "bg-warn" }
   if (c.system_state === "cooling")
-    return { title: "Your system is on and cooling 🟢", tone: "text-ok" }
+    return { title: "Your system is on and cooling", tone: "text-muted-foreground", dot: "bg-ok" }
   if (c.system_state === "fan_only")
-    return { title: "Your fan is running, circulating air 🟢", tone: "text-ok" }
-  return { title: "Your system is off ⚪", tone: "text-muted-foreground" }
+    return { title: "Your fan is running, circulating air", tone: "text-muted-foreground", dot: "bg-ok" }
+  return { title: "Your system is off", tone: "text-muted-foreground", dot: "bg-muted" }
 }
 
 // Efficiency verdict in soft homeowner language.
@@ -161,9 +161,10 @@ export function HomeView() {
         <ComfortProfilePanel />
       ) : (
         <section aria-label="Home view" className="flex flex-col gap-4">
-          {/* 1. Friendly system status headline */}
-          <div className="rounded-2xl border border-border bg-card p-6 text-center shadow-lg shadow-black/40">
-            <h2 className={`text-2xl font-semibold text-balance ${status.tone}`}>{status.title}</h2>
+          {/* 1. System status — quiet, inconspicuous line */}
+          <div className="flex items-center justify-center gap-2 pt-1">
+            <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${status.dot}`} aria-hidden="true" />
+            <p className={`text-sm font-medium ${status.tone}`}>{status.title}</p>
           </div>
 
           {/* 2. Happy Number — live comfort HUD */}
