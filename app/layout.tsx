@@ -9,6 +9,12 @@ export const metadata: Metadata = {
   title: "Elevate Home App — HVAC Efficiency",
   description:
     "Live HVAC efficiency, measured SEER2 estimate, live Evergy cost, and anomaly detection for a single home.",
+  manifest: "/manifest.json",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "black-translucent",
+    title: "Elevate",
+  },
 }
 
 export const viewport: Viewport = {
