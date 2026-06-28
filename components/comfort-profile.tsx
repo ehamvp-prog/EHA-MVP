@@ -51,16 +51,8 @@ const HEALTH_OPTIONS: { value: string; label: string }[] = [
   { value: "sleep_issues", label: "Sleep Issues" },
 ]
 
-export function ComfortProfilePanel({
-  liveTempF,
-  liveRh,
-  systemRunning,
-}: {
-  liveTempF: number | null
-  liveRh: number | null
-  systemRunning: boolean
-}) {
-  const { data, isLoading } = useSWR<{ ok: boolean; profile: ProfileRow | null }>(
+export function ComfortProfilePanel() {
+  const { data } = useSWR<{ ok: boolean; profile: ProfileRow | null }>(
     "/api/comfort/profile",
     fetcher,
   )
@@ -69,17 +61,11 @@ export function ComfortProfilePanel({
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [savedAt, setSavedAt] = useState<number | null>(null)
-  const [hasProfile, setHasProfile] = useState<boolean | null>(null)
 
   // Hydrate the form once the saved profile loads.
   useEffect(() => {
-    if (data && !dirty) {
-      if (data.profile) {
-        setForm({ ...DEFAULT_PROFILE, ...data.profile, health_considerations: data.profile.health_considerations ?? [] })
-        setHasProfile(true)
-      } else {
-        setHasProfile(false)
-      }
+    if (data?.profile && !dirty) {
+      setForm({ ...DEFAULT_PROFILE, ...data.profile, health_considerations: data.profile.health_considerations ?? [] })
     }
   }, [data, dirty])
 
@@ -106,7 +92,6 @@ export function ComfortProfilePanel({
       })
       await mutate("/api/comfort/profile")
       setDirty(false)
-      setHasProfile(true)
       setSavedAt(Date.now())
       setTimeout(() => setSavedAt(null), 2500)
     } finally {
@@ -254,20 +239,44 @@ export function ComfortProfilePanel({
         </div>
       </Card>
 
-      {/* Happy Number + recommendations + training */}
-      <HappyNumberCard
-        profile={form}
-        hasProfile={hasProfile}
-        isLoading={isLoading}
-        liveTempF={liveTempF}
-        liveRh={liveRh}
-        systemRunning={systemRunning}
-      />
     </section>
   )
 }
 
 // ---- Happy Number ----------------------------------------------------------
+
+// Self-contained HUD panel for the My Home view. Reads the SAVED comfort
+// profile (same SWR key as the form, so it dedupes) and scores it against
+// the live indoor air. Lives on the dashboard, not the profile editor.
+export function HappyNumberPanel({
+  liveTempF,
+  liveRh,
+  systemRunning,
+}: {
+  liveTempF: number | null
+  liveRh: number | null
+  systemRunning: boolean
+}) {
+  const { data, isLoading } = useSWR<{ ok: boolean; profile: ProfileRow | null }>(
+    "/api/comfort/profile",
+    fetcher,
+  )
+  const profile: Profile = data?.profile
+    ? { ...DEFAULT_PROFILE, ...data.profile, health_considerations: data.profile.health_considerations ?? [] }
+    : DEFAULT_PROFILE
+  const hasProfile = data ? data.profile != null : null
+
+  return (
+    <HappyNumberCard
+      profile={profile}
+      hasProfile={hasProfile}
+      isLoading={isLoading}
+      liveTempF={liveTempF}
+      liveRh={liveRh}
+      systemRunning={systemRunning}
+    />
+  )
+}
 
 function HappyNumberCard({
   profile,
@@ -310,7 +319,7 @@ function HappyNumberCard({
       <Card>
         <CardHeader icon={<Smile className="h-5 w-5 text-ok" />} title="Your Happy Number" />
         <p className="text-sm text-muted-foreground text-pretty">
-          Set your comfort profile above and save it to see your live Happy Number.
+          Set your comfort profile in the Comfort Profile tab to see your live Happy Number.
         </p>
       </Card>
     )

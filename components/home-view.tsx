@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react"
 import useSWR from "swr"
 import { DollarSign, Thermometer, Wind, Sun, Home as HomeIcon, Smile } from "lucide-react"
-import { ComfortProfilePanel } from "./comfort-profile"
+import { ComfortProfilePanel, HappyNumberPanel } from "./comfort-profile"
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
 
@@ -146,17 +146,20 @@ export function HomeView() {
       </div>
 
       {subTab === "comfort" ? (
-        <ComfortProfilePanel
-          liveTempF={c?.return_temp_f ?? null}
-          liveRh={c?.return_rh ?? null}
-          systemRunning={!!c?.system_running}
-        />
+        <ComfortProfilePanel />
       ) : (
         <section aria-label="Home view" className="flex flex-col gap-4">
           {/* 1. Friendly system status headline */}
           <div className="rounded-2xl border border-border bg-card p-6 text-center shadow-lg shadow-black/40">
             <h2 className={`text-2xl font-semibold text-balance ${status.tone}`}>{status.title}</h2>
           </div>
+
+          {/* 2. Happy Number — live comfort HUD */}
+          <HappyNumberPanel
+            liveTempF={c?.return_temp_f ?? null}
+            liveRh={c?.return_rh ?? null}
+            systemRunning={!!c?.system_running}
+          />
 
       {/* 2. Cost — the centerpiece */}
       <div className="rounded-2xl border border-border bg-card p-5 shadow-lg shadow-black/40">
