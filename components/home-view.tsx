@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react"
 import useSWR from "swr"
+import { DollarSign, Thermometer, Wind, Sun, Home as HomeIcon, Smile } from "lucide-react"
+import { ComfortProfilePanel } from "./comfort-profile"
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
 
@@ -118,6 +120,7 @@ export function HomeView() {
   }, [])
 
   const [historyOpen, setHistoryOpen] = useState(false)
+  const [subTab, setSubTab] = useState<"home" | "comfort">("home")
   const c = data?.computed
 
   const status = systemStatus(c)
@@ -127,15 +130,37 @@ export function HomeView() {
   const ratedSeer2 = c?.diagnostics?.ratedSeer2 ?? null
 
   return (
-    <section aria-label="Home view" className="flex flex-col gap-4">
-      {/* 1. Friendly system status headline */}
-      <div className="rounded-2xl border border-border bg-card p-6 text-center shadow-lg shadow-black/40">
-        <h2 className={`text-2xl font-semibold text-balance ${status.tone}`}>{status.title}</h2>
+    <div className="flex flex-col gap-4">
+      {/* Sub-tabs: live dashboard vs comfort profile */}
+      <div
+        className="flex items-center gap-1 rounded-2xl border border-border bg-card p-1"
+        role="tablist"
+        aria-label="Home sections"
+      >
+        <SubTab active={subTab === "home"} onClick={() => setSubTab("home")} icon={<HomeIcon className="h-4 w-4" />}>
+          My Home
+        </SubTab>
+        <SubTab active={subTab === "comfort"} onClick={() => setSubTab("comfort")} icon={<Smile className="h-4 w-4" />}>
+          Comfort Profile
+        </SubTab>
       </div>
+
+      {subTab === "comfort" ? (
+        <ComfortProfilePanel
+          liveTempF={c?.return_temp_f ?? null}
+          liveRh={c?.return_rh ?? null}
+          systemRunning={!!c?.system_running}
+        />
+      ) : (
+        <section aria-label="Home view" className="flex flex-col gap-4">
+          {/* 1. Friendly system status headline */}
+          <div className="rounded-2xl border border-border bg-card p-6 text-center shadow-lg shadow-black/40">
+            <h2 className={`text-2xl font-semibold text-balance ${status.tone}`}>{status.title}</h2>
+          </div>
 
       {/* 2. Cost — the centerpiece */}
       <div className="rounded-2xl border border-border bg-card p-5 shadow-lg shadow-black/40">
-        <h3 className="mb-4 text-base font-semibold text-foreground">What you&apos;re spending</h3>
+        <SectionHeader icon={<DollarSign className="h-5 w-5 text-ok" />} title="What you're spending" />
         <div className="grid grid-cols-3 gap-3">
           <CostTile label="Right now" value={c?.cost_per_hour != null ? `${money(c.cost_per_hour)}` : "—"} sub="per hour" big />
           <CostTile label="This week" value={money(history?.week_to_date)} sub="energy used" />
@@ -170,25 +195,14 @@ export function HomeView() {
             How efficiently you&apos;re running: <span className={eff.tone}>{eff.label}</span>
           </h3>
         </div>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div className="rounded-xl border border-border bg-elevated p-4">
-            <p className="text-sm text-muted-foreground text-pretty">
-              Right now your system is running at{" "}
-              <span className="font-semibold text-foreground">
-                {c?.live_eer != null ? c.live_eer.toFixed(1) : "—"}
-              </span>{" "}
-              efficiency.
-            </p>
-          </div>
-          <div className="rounded-xl border border-border bg-elevated p-4">
-            <p className="text-sm text-muted-foreground text-pretty">
-              Your system&apos;s overall efficiency rating:{" "}
-              <span className="font-semibold text-foreground">
-                {c?.measured_seer2_estimate != null ? c.measured_seer2_estimate.toFixed(1) : "—"}
-              </span>
-              {ratedSeer2 ? ` (rated ${ratedSeer2}).` : "."}
-            </p>
-          </div>
+        <div className="rounded-xl border border-border bg-elevated p-4">
+          <p className="text-sm text-muted-foreground text-pretty">
+            Your system&apos;s overall efficiency rating:{" "}
+            <span className="font-semibold text-foreground">
+              {c?.measured_seer2_estimate != null ? c.measured_seer2_estimate.toFixed(1) : "—"}
+            </span>
+            {ratedSeer2 ? ` (rated ${ratedSeer2}).` : "."}
+          </p>
         </div>
         <p className="mt-3 text-center text-xs text-muted-foreground">
           A new system is typically rated 15–18. Higher is better.
@@ -197,7 +211,7 @@ export function HomeView() {
 
       {/* 4. Temperature & Humidity */}
       <div className="rounded-2xl border border-border bg-card p-5 shadow-lg shadow-black/40">
-        <h3 className="mb-4 text-base font-semibold text-foreground">Your air right now</h3>
+        <SectionHeader icon={<Thermometer className="h-5 w-5 text-primary" />} title="Your air right now" />
         <div className="grid grid-cols-2 gap-3">
           <TempTile label="Cool air coming out" value={c?.supply_temp_f != null ? `${Math.round(c.supply_temp_f)}°F` : "—"} />
           <TempTile label="Warm air going in" value={c?.return_temp_f != null ? `${Math.round(c.return_temp_f)}°F` : "—"} />
@@ -210,7 +224,7 @@ export function HomeView() {
 
       {/* 5. Static pressure → filter health */}
       <div className="rounded-2xl border border-border bg-card p-5 shadow-lg shadow-black/40">
-        <h3 className="mb-3 text-base font-semibold text-foreground">Filter &amp; airflow</h3>
+        <SectionHeader icon={<Wind className="h-5 w-5 text-accent" />} title="Filter & airflow" />
         <div className="flex items-center gap-3 rounded-xl border border-border bg-elevated p-4">
           <span className={`h-4 w-4 shrink-0 rounded-full ${airflow.dot}`} aria-hidden />
           <div>
@@ -224,12 +238,53 @@ export function HomeView() {
         </div>
       </div>
 
-      {/* 6. Outdoor conditions */}
-      <div className="rounded-2xl border border-border bg-card p-5 shadow-lg shadow-black/40">
-        <h3 className="mb-3 text-base font-semibold text-foreground">Outside your home</h3>
-        <p className="text-sm text-muted-foreground text-pretty">{outdoorMessage(c?.outdoor_temp_f ?? null)}</p>
-      </div>
-    </section>
+          {/* 6. Outdoor conditions */}
+          <div className="rounded-2xl border border-border bg-card p-5 shadow-lg shadow-black/40">
+            <SectionHeader icon={<Sun className="h-5 w-5 text-warn" />} title="Outside your home" />
+            <p className="text-sm text-muted-foreground text-pretty">{outdoorMessage(c?.outdoor_temp_f ?? null)}</p>
+          </div>
+        </section>
+      )}
+    </div>
+  )
+}
+
+function SubTab({
+  children,
+  active,
+  onClick,
+  icon,
+}: {
+  children: React.ReactNode
+  active: boolean
+  onClick: () => void
+  icon: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      onClick={onClick}
+      className={`flex flex-1 items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition-colors ${
+        active ? "bg-primary text-primary-foreground" : "text-muted hover:text-foreground"
+      }`}
+    >
+      {icon}
+      {children}
+    </button>
+  )
+}
+
+// Section header with a soft icon badge, matching the comfort cards.
+function SectionHeader({ icon, title }: { icon: React.ReactNode; title: string }) {
+  return (
+    <div className="mb-3 flex items-center gap-2.5">
+      <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-border bg-elevated">
+        {icon}
+      </span>
+      <h3 className="text-base font-semibold text-foreground">{title}</h3>
+    </div>
   )
 }
 
