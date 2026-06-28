@@ -134,7 +134,12 @@ export function explainGap(opts: {
 
 export const CAPTURE_HALF_LIFE_DAYS = 30
 
-export type Capture = { captured_at: string; temp_f: number; rh: number }
+export type Capture = {
+  captured_at: string
+  temp_f: number
+  rh: number
+  source?: "nest" | "sensor"
+}
 
 export function learnedTargetFromCaptures(
   captures: Capture[],
