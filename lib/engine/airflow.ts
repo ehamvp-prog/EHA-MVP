@@ -12,8 +12,14 @@
 //                      table for the entered furnace/air-handler model.
 //                      Tightest, most defensible. (Used when a table
 //                      exists for the model; none are bundled yet.)
-//   "static_derived" : static pressure read against a GENERALIZED blower
-//                      curve anchored to design airflow. Honest
+//   "ecm_commanded"  : constant-airflow ECM. The motor holds its commanded
+//                      (design) CFM across its rated static range, so CFM =
+//                      tonnage * cfm_per_ton. Static is NOT used to reduce
+//                      CFM here (that would be PSC behavior); it only flags
+//                      operation beyond the ECM's rated static limit. Live
+//                      blower watts validate that the motor is holding.
+//   "static_derived" : PSC / fixed-speed blower read against a GENERALIZED
+//                      blower curve anchored to design airflow. Honest
 //                      approximation, far better than a fixed number.
 //   "fallback"       : no static reading or no tonnage. Airflow is
 //                      UNKNOWN -> returned null, and downstream
@@ -29,7 +35,11 @@
 // The nominal rated CFM is also kept as an outer-bounds reference.
 // =====================================================================
 
-export type AirflowConfidence = "static_oem" | "static_derived" | "fallback"
+export type AirflowConfidence =
+  | "static_oem" // static read against a real OEM blower table
+  | "ecm_commanded" // constant-airflow ECM holding its commanded CFM
+  | "static_derived" // PSC/fixed-speed read against the generalized curve
+  | "fallback" // airflow unknown
 
 export interface AirflowResult {
   cfm: number | null // usable airflow for capacity; null when fallback
@@ -52,6 +62,19 @@ const HIGH_STATIC_INWC = 0.8
 const FACTOR_MIN = 0.4
 const FACTOR_MAX = 1.6
 
+// --- Constant-airflow ECM behavior ---------------------------------------
+// A constant-CFM ECM is DESIGNED to hold its commanded airflow across the
+// manufacturer's rated external-static range. It does this by drawing MORE
+// power as static rises (the opposite of a PSC, which loses CFM). So within
+// this range we hold commanded CFM and do NOT apply any fan-law downslope.
+// Typical residential ECM max rated external static is ~0.8" WC; above that
+// the motor MAY begin to fall off its target, which we flag (not silently
+// halve). Confirm the exact limit from the blower's spec sheet when known.
+const ECM_MAX_RATED_STATIC_INWC = 0.8
+// Minimum live blower watts that indicate the ECM is energized and working
+// to hold airflow. Below this we can't confirm it's holding commanded CFM.
+const ECM_ENERGIZED_MIN_W = 40
+
 interface AirflowInputs {
   staticInWc: number | null | undefined
   tonnage: number | null | undefined
@@ -60,6 +83,7 @@ interface AirflowInputs {
   blowerModel: string | null | undefined // exact model -> OEM table if known
   ecmProfile: string | null | undefined // presence implies ECM/variable
   blowerSpeedTap: string | null | undefined
+  blowerWatts?: number | null | undefined // live blower power, ECM validity signal
 }
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -153,22 +177,44 @@ export function deriveAirflow(input: AirflowInputs): AirflowResult {
     }
   }
 
-  // ECM / variable-speed: blower targets commanded (design) airflow; the
-  // static reading is the sanity check. We still report it via the
-  // generalized curve so high static visibly pulls CFM down.
+  // Constant-airflow ECM: the motor HOLDS its commanded (design) CFM across
+  // its rated static range by spending more watts as static rises — it does
+  // NOT lose airflow to a fan-law downslope the way a PSC does. So CFM =
+  // commanded design airflow (rated). Blower watts are the validity signal,
+  // and static is only used to flag operation beyond the ECM's rated limit.
   if (isEcm(input.ecmProfile)) {
-    const cfm = generalizedCurveCfm(rated, staticInWc)
+    const blowerW =
+      input.blowerWatts != null && Number.isFinite(input.blowerWatts)
+        ? input.blowerWatts
+        : null
+    const energized = blowerW != null && blowerW >= ECM_ENERGIZED_MIN_W
+    const overRatedStatic = staticInWc > ECM_MAX_RATED_STATIC_INWC
+    const cfmRounded = Math.round(rated)
+
+    // Blower power present but too low to be holding design airflow: we can't
+    // confirm the ECM is doing its job, so hold commanded but lower confidence.
+    if (blowerW != null && !energized) {
+      return {
+        cfm: rated,
+        confidence: "static_derived",
+        ratedCfm: rated,
+        staticInWc,
+        staticFlag,
+        generalizedModel: false,
+        note: `ECM blower power is low (${Math.round(blowerW)} W); can't confirm it's holding airflow. Using commanded ~${cfmRounded} CFM.`,
+      }
+    }
+
     return {
-      cfm,
-      confidence: "static_derived",
+      cfm: rated,
+      confidence: "ecm_commanded",
       ratedCfm: rated,
       staticInWc,
       staticFlag,
-      generalizedModel: true,
-      note:
-        staticFlag === "high"
-          ? "ECM blower; generalized curve at high static (real CFM may be reduced)."
-          : "ECM blower; generalized curve at measured static.",
+      generalizedModel: false,
+      note: overRatedStatic
+        ? `ECM holding commanded ~${cfmRounded} CFM, but static (${staticInWc.toFixed(2)}" WC) exceeds the typical ECM limit (~${ECM_MAX_RATED_STATIC_INWC}" WC) — airflow may be starting to fall off. Check ductwork/filter.`
+        : `ECM holds commanded ~${cfmRounded} CFM across its rated static range (watts rise with static — expected and correct).`,
     }
   }
 
