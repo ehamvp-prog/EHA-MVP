@@ -187,12 +187,12 @@ export function ComfortProfilePanel() {
           ticks={["25% (Dry)", "45% (Median)", "65% (Humid)"]}
         />
 
-        {/* Calculated target comfort score — matches the dual ring's blue Target arc */}
+        {/* Calculated Happy Number — matches the Happy Ring's blue target arc */}
         <div className="mt-5 flex items-center justify-between gap-3 rounded-xl border border-accent/30 bg-accent/5 px-4 py-3">
           <div className="flex items-center gap-2.5">
             <Target className="h-5 w-5 shrink-0 text-accent" />
             <div>
-              <p className="text-sm font-semibold text-foreground">Your Target Comfort Score</p>
+              <p className="text-sm font-semibold text-foreground">Your Happy Number</p>
               <p className="text-xs text-muted-foreground text-pretty">
                 Calculated from these preferences using ASHRAE Standard 55.
               </p>
@@ -492,7 +492,7 @@ function ComfortRingCard({
   if (isLoading) {
     return (
       <Card>
-        <CardHeader icon={<Gauge className="h-5 w-5 text-ok" />} title="Your Comfort Ring" />
+        <CardHeader icon={<Gauge className="h-5 w-5 text-ok" />} title="Your Happy Ring" />
         <p className="text-sm text-muted">Loading your comfort profile…</p>
       </Card>
     )
@@ -501,9 +501,9 @@ function ComfortRingCard({
   if (hasProfile === false) {
     return (
       <Card>
-        <CardHeader icon={<Gauge className="h-5 w-5 text-ok" />} title="Your Comfort Ring" />
+        <CardHeader icon={<Gauge className="h-5 w-5 text-ok" />} title="Your Happy Ring" />
         <p className="text-sm text-muted-foreground text-pretty">
-          Set your comfort profile in the Comfort Profile tab to see your live comfort ring.
+          Set your comfort profile in the Comfort Profile tab to see your live Happy Ring.
         </p>
       </Card>
     )
@@ -512,7 +512,7 @@ function ComfortRingCard({
   if (reality == null || gapInfo == null) {
     return (
       <Card>
-        <CardHeader icon={<Gauge className="h-5 w-5 text-ok" />} title="Your Comfort Ring" />
+        <CardHeader icon={<Gauge className="h-5 w-5 text-ok" />} title="Your Happy Ring" />
         <p className="text-sm text-muted-foreground">
           Waiting for a live indoor reading to score your comfort…
         </p>
@@ -529,8 +529,8 @@ function ComfortRingCard({
     <Card>
       <CardHeader
         icon={<Gauge className="h-5 w-5 text-ok" />}
-        title="Your Comfort Ring"
-        sub="Pure ASHRAE Standard 55 comfort — your target vs. how your home actually feels right now."
+        title="Your Happy Ring"
+        sub="Pure ASHRAE Standard 55 comfort — your Happy Number vs. your home's live Comfort Score right now."
       />
 
       {!systemRunning ? (
@@ -848,7 +848,7 @@ function DualGauge({
           {reality}
         </span>
         <span className="mt-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          comfort now
+          comfort score
         </span>
       </div>
     </div>
@@ -875,14 +875,14 @@ function DualGauge({
       <div className="mt-4 flex items-center gap-6">
         <div className="flex items-center gap-2">
           <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: accentStroke }} aria-hidden="true" />
-          <span className="text-xs text-muted-foreground">Target</span>
+          <span className="text-xs text-muted-foreground">Happy Number</span>
           <span className="text-lg font-bold tabular-nums" style={{ color: accentStroke }}>
             {target}
           </span>
         </div>
         <div className="flex items-center gap-2">
           <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: realityStroke }} aria-hidden="true" />
-          <span className="text-xs text-muted-foreground">Now</span>
+          <span className="text-xs text-muted-foreground">Comfort Score</span>
           <span className="text-lg font-bold tabular-nums" style={{ color: realityStroke }}>
             {reality}
           </span>
