@@ -1,11 +1,13 @@
 "use client"
 
+import { useEffect, useState } from "react"
 import useSWR from "swr"
 import Link from "next/link"
 import { DeviceCard } from "./device-card"
 import { WeatherPanel } from "./weather-panel"
 import { HistoryFeed } from "./history-feed"
 import { PerformancePanel } from "./performance-panel"
+import { HomeView } from "./home-view"
 import { freshness } from "@/lib/telemetry-format"
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
@@ -22,6 +24,18 @@ export function Dashboard() {
   const { data, isLoading, error } = useSWR("/api/telemetry/latest?history=50", fetcher, {
     refreshInterval: 5000,
   })
+
+  // View toggle: "tech" (existing) vs "home" (homeowner-friendly). Persists
+  // for the session. Starts on "tech" to match SSR, then restores on mount.
+  const [view, setView] = useState<"tech" | "home">("tech")
+  useEffect(() => {
+    const saved = sessionStorage.getItem("eha-view")
+    if (saved === "home" || saved === "tech") setView(saved)
+  }, [])
+  const selectView = (v: "tech" | "home") => {
+    setView(v)
+    sessionStorage.setItem("eha-view", v)
+  }
 
   const devices: DeviceRow[] = data?.devices ?? []
   const history: DeviceRow[] = data?.history ?? []
@@ -47,6 +61,35 @@ export function Dashboard() {
           </h1>
         </div>
         <div className="flex items-center gap-4">
+          {/* View toggle: Home vs Tech. Instant, no reload. */}
+          <div
+            className="flex items-center rounded-full border border-border bg-card p-0.5"
+            role="tablist"
+            aria-label="Dashboard view"
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === "home"}
+              onClick={() => selectView("home")}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                view === "home" ? "bg-primary text-primary-foreground" : "text-muted hover:text-foreground"
+              }`}
+            >
+              Home
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === "tech"}
+              onClick={() => selectView("tech")}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                view === "tech" ? "bg-primary text-primary-foreground" : "text-muted hover:text-foreground"
+              }`}
+            >
+              Tech
+            </button>
+          </div>
           <div className="flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5">
             <span className={`h-2.5 w-2.5 rounded-full ${dotClass}`} aria-hidden />
             <span className="text-xs font-medium text-muted-foreground">
@@ -72,6 +115,10 @@ export function Dashboard() {
         </div>
       </header>
 
+      {view === "home" ? (
+        <HomeView />
+      ) : (
+        <>
       {/* Performance — the live efficiency engine output */}
       <div className="mb-6">
         <PerformancePanel />
@@ -116,6 +163,8 @@ export function Dashboard() {
 
       {/* History */}
       <HistoryFeed rows={history} />
+        </>
+      )}
 
       <p className="mt-6 text-center text-xs text-muted">
         Elevate Home App · live efficiency, cost &amp; health · updates every 5 seconds
