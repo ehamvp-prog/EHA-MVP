@@ -5,6 +5,7 @@ import useSWR from "swr"
 import { DollarSign, Thermometer, Wind, Sun, Home as HomeIcon, Smile } from "lucide-react"
 import { ComfortProfilePanel, HappyNumberPanel } from "./comfort-profile"
 import { NestCard } from "./nest-card"
+import { AutomationJournalCard } from "./automation-journal"
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
 
@@ -120,6 +121,16 @@ export function HomeView() {
     return () => clearInterval(id)
   }, [])
 
+  // Drive the automation engine on a 5-minute cadence (no server cron here).
+  // The engine self-guards with cooldowns, peak windows, and once-per-day
+  // checks, so an extra call on mount is safe and idempotent.
+  useEffect(() => {
+    const tick = () => fetch("/api/automation/tick", { method: "POST" }).catch(() => {})
+    tick()
+    const id = setInterval(tick, 300000)
+    return () => clearInterval(id)
+  }, [])
+
   const [historyOpen, setHistoryOpen] = useState(false)
   const [subTab, setSubTab] = useState<"home" | "comfort">("home")
   const c = data?.computed
@@ -164,6 +175,9 @@ export function HomeView() {
 
           {/* 3. Nest thermostat — display & control (self-hides if unconfigured) */}
           <NestCard />
+
+          {/* 4. Automation journal — self-hides until there's history */}
+          <AutomationJournalCard />
 
       {/* 2. Cost — the centerpiece */}
       <div className="rounded-2xl border border-border bg-card p-5 shadow-lg shadow-black/40">

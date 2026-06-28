@@ -23,6 +23,18 @@ const NUM_FIELDS = [
   "rated_seer2",
   "cfm_per_ton",
   "seer2_conversion_factor",
+  // Automation tuning (installer-enrolled).
+  "auto_comfort_temp_min_f",
+  "auto_comfort_temp_max_f",
+  "peak_dodger_precool_offset_f",
+  "peak_dodger_coast_offset_f",
+] as const
+
+// Automation enrollment toggles. Default OFF — nothing actuates until enrolled.
+const BOOL_FIELDS = [
+  "auto_comfort_enabled",
+  "auto_comfort_fan_enabled",
+  "peak_dodger_enabled",
 ] as const
 
 // GET: read the full installer profile for this home.
@@ -80,6 +92,11 @@ export async function POST(request: Request) {
     // Evergy RTOU confirmation checkbox.
     if ("evergy_rtou_confirmed" in body) {
       update.evergy_rtou_confirmed = Boolean(body.evergy_rtou_confirmed)
+    }
+
+    // Automation enrollment toggles.
+    for (const f of BOOL_FIELDS) {
+      if (f in body) update[f] = Boolean(body[f])
     }
 
     // Weather ZIP: if provided, re-geocode so lat/lon stay in sync.
