@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import useSWR from "swr"
 import { DollarSign, Thermometer, Wind, Sun, Home as HomeIcon, Smile } from "lucide-react"
 import { ComfortProfilePanel, HappyNumberPanel } from "./comfort-profile"
+import { NestCard } from "./nest-card"
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
 
@@ -160,6 +161,9 @@ export function HomeView() {
             liveRh={c?.return_rh ?? null}
             systemRunning={!!c?.system_running}
           />
+
+          {/* 3. Nest thermostat — display & control (self-hides if unconfigured) */}
+          <NestCard />
 
       {/* 2. Cost — the centerpiece */}
       <div className="rounded-2xl border border-border bg-card p-5 shadow-lg shadow-black/40">
