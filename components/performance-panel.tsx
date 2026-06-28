@@ -127,6 +127,35 @@ export function PerformancePanel() {
         </div>
       </div>
 
+      {/* Sensor-fault banner — shown only when signals disagree */}
+      {faults.length > 0 ? (
+        <ul className="flex flex-col gap-2" aria-label="Sensor alerts">
+          {faults.map((f) => (
+            <li
+              key={f.code}
+              className={`flex items-start gap-3 rounded-xl border px-4 py-3 text-sm ${
+                f.severity === "fault"
+                  ? "border-bad/40 bg-bad/10 text-foreground"
+                  : "border-warn/40 bg-warn/10 text-foreground"
+              }`}
+            >
+              <span
+                className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${
+                  f.severity === "fault" ? "bg-bad glow-bad" : "bg-warn glow-warn"
+                }`}
+                aria-hidden
+              />
+              <span className="text-pretty">
+                <span className="font-semibold capitalize">
+                  {f.severity === "fault" ? "Sensor fault" : "Check"}:
+                </span>{" "}
+                {f.message}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
       {/* Performance gauges */}
       <div className="rounded-2xl border border-border bg-card p-4 shadow-lg shadow-black/40">
         <h3 className="mb-3 text-sm font-semibold text-foreground">Live Performance</h3>
