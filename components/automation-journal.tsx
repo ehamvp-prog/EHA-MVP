@@ -12,6 +12,7 @@ import {
   ChevronDown,
   CheckCircle2,
   Clock,
+  Filter,
 } from "lucide-react"
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
@@ -81,6 +82,11 @@ export function AutomationJournalCard() {
           <ChevronDown className={`h-3.5 w-3.5 transition-transform ${expanded ? "rotate-180" : ""}`} />
         </button>
       ) : null}
+
+      <p className="mt-3 flex items-center justify-center gap-1.5 text-center text-[11px] text-muted">
+        <ShieldCheck className="h-3 w-3 shrink-0" />
+        Automation runs automatically in the background — even when this app is closed.
+      </p>
     </div>
   )
 }
@@ -165,6 +171,10 @@ function actionMeta(type: string): {
       return { label: "Fan circulation", icon: Wind, badge: "bg-accent/15 text-accent" }
     case "recommendation":
       return { label: "Recommendation", icon: Lightbulb, badge: "bg-warn/15 text-warn" }
+    case "evaluation":
+      return { label: "Checked in", icon: Clock, badge: "bg-elevated text-muted-foreground" }
+    case "filter_change":
+      return { label: "Filter change", icon: Filter, badge: "bg-accent/15 text-accent" }
     default:
       return { label: "Automation", icon: ShieldCheck, badge: "bg-elevated text-muted-foreground" }
   }

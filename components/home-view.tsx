@@ -2,10 +2,11 @@
 
 import { useEffect, useState } from "react"
 import useSWR from "swr"
-import { DollarSign, Thermometer, Wind, Sun, Home as HomeIcon, Smile } from "lucide-react"
+import { DollarSign, Thermometer, Sun, Home as HomeIcon, Smile } from "lucide-react"
 import { ComfortProfilePanel, HappyNumberPanel } from "./comfort-profile"
 import { NestCard } from "./nest-card"
 import { AutomationJournalCard } from "./automation-journal"
+import { FilterHealthCard } from "./filter-health-card"
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
 
@@ -36,16 +37,16 @@ function money(n: number | null | undefined, digits = 2): string {
 // ---- Plain-language translators -------------------------------------------
 
 // Friendly top-of-screen system status (emojis requested for this headline).
-function systemStatus(c: Computed | undefined): { title: string; tone: string } {
-  if (!c) return { title: "Connecting to your system…", tone: "text-muted-foreground" }
+function systemStatus(c: Computed | undefined): { title: string; tone: string; dot: string } {
+  if (!c) return { title: "Connecting to your system…", tone: "text-muted-foreground", dot: "bg-muted" }
   const hardFault = c.sensor_faults?.some((f) => f.severity === "fault")
   if (c.system_state === "fault" && hardFault)
-    return { title: "Something looks off — tap for details 🟠", tone: "text-orange" }
+    return { title: "Something looks off — tap for details", tone: "text-warn", dot: "bg-warn" }
   if (c.system_state === "cooling")
-    return { title: "Your system is on and cooling 🟢", tone: "text-ok" }
+    return { title: "Your system is on and cooling", tone: "text-muted-foreground", dot: "bg-ok" }
   if (c.system_state === "fan_only")
-    return { title: "Your fan is running, circulating air 🟢", tone: "text-ok" }
-  return { title: "Your system is off ⚪", tone: "text-muted-foreground" }
+    return { title: "Your fan is running, circulating air", tone: "text-muted-foreground", dot: "bg-ok" }
+  return { title: "Your system is off", tone: "text-muted-foreground", dot: "bg-muted" }
 }
 
 // Efficiency verdict in soft homeowner language.
@@ -73,18 +74,6 @@ function humidityComfort(rh: number | null): { label: string; tone: string } {
   if (rh < 65) return { label: "A little humid — like a mild afternoon", tone: "text-warn" }
   if (rh < 80) return { label: "Humid — like a summer afternoon", tone: "text-warn" }
   return { label: "Very humid — tropical air", tone: "text-orange" }
-}
-
-// Static pressure → filter / airflow health. Thresholds mirror the engine's
-// ECM rated-static limit (~0.8" WC) so this stays consistent with the model.
-function airflowHealth(staticInWc: number | null): { label: string; tone: string; dot: string } {
-  if (staticInWc == null)
-    return { label: "Airflow reading unavailable", tone: "text-muted-foreground", dot: "bg-muted" }
-  if (staticInWc <= 0.8)
-    return { label: "Airflow is good", tone: "text-ok", dot: "bg-ok glow-ok" }
-  if (staticInWc <= 1.0)
-    return { label: "Airflow slightly restricted — check your filter", tone: "text-warn", dot: "bg-warn glow-warn" }
-  return { label: "Airflow restricted — filter change needed", tone: "text-orange", dot: "bg-orange glow-orange" }
 }
 
 // Outdoor reassurance copy pulled from the live outdoor temp.
@@ -121,15 +110,10 @@ export function HomeView() {
     return () => clearInterval(id)
   }, [])
 
-  // Drive the automation engine on a 5-minute cadence (no server cron here).
-  // The engine self-guards with cooldowns, peak windows, and once-per-day
-  // checks, so an extra call on mount is safe and idempotent.
-  useEffect(() => {
-    const tick = () => fetch("/api/automation/tick", { method: "POST" }).catch(() => {})
-    tick()
-    const id = setInterval(tick, 300000)
-    return () => clearInterval(id)
-  }, [])
+  // NOTE: The automation engine is NOT triggered from the client. It runs
+  // server-side on a Supabase pg_cron schedule (every 5 min) so it works even
+  // when the app is closed. Home View only READS the journal + live comfort
+  // numbers through the normal SWR fetches below.
 
   const [historyOpen, setHistoryOpen] = useState(false)
   const [subTab, setSubTab] = useState<"home" | "comfort">("home")
@@ -138,7 +122,6 @@ export function HomeView() {
   const status = systemStatus(c)
   const eff = efficiencyLabel(c?.efficiency_color ?? "learning")
   const humidity = humidityComfort(c?.return_rh ?? null)
-  const airflow = airflowHealth(c?.static_pressure_inwc ?? null)
   const ratedSeer2 = c?.diagnostics?.ratedSeer2 ?? null
 
   return (
@@ -161,9 +144,10 @@ export function HomeView() {
         <ComfortProfilePanel />
       ) : (
         <section aria-label="Home view" className="flex flex-col gap-4">
-          {/* 1. Friendly system status headline */}
-          <div className="rounded-2xl border border-border bg-card p-6 text-center shadow-lg shadow-black/40">
-            <h2 className={`text-2xl font-semibold text-balance ${status.tone}`}>{status.title}</h2>
+          {/* 1. System status — quiet, inconspicuous line */}
+          <div className="flex items-center justify-center gap-2 pt-1">
+            <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${status.dot}`} aria-hidden="true" />
+            <p className={`text-sm font-medium ${status.tone}`}>{status.title}</p>
           </div>
 
           {/* 2. Happy Number — live comfort HUD */}
@@ -243,21 +227,8 @@ export function HomeView() {
         </div>
       </div>
 
-      {/* 5. Static pressure → filter health */}
-      <div className="rounded-2xl border border-border bg-card p-5 shadow-lg shadow-black/40">
-        <SectionHeader icon={<Wind className="h-5 w-5 text-accent" />} title="Filter & airflow" />
-        <div className="flex items-center gap-3 rounded-xl border border-border bg-elevated p-4">
-          <span className={`h-4 w-4 shrink-0 rounded-full ${airflow.dot}`} aria-hidden />
-          <div>
-            <p className={`text-base font-semibold text-pretty ${airflow.tone}`}>{airflow.label}</p>
-            <p className="mt-0.5 text-xs text-muted">
-              {c?.static_pressure_inwc != null
-                ? `Static pressure: ${c.static_pressure_inwc.toFixed(2)}" WC`
-                : "Awaiting reading"}
-            </p>
-          </div>
-        </div>
-      </div>
+      {/* 5. Filter health — needle gauge driven by filter LOAD ratio */}
+      <FilterHealthCard staticInWc={c?.static_pressure_inwc ?? null} />
 
           {/* 6. Outdoor conditions */}
           <div className="rounded-2xl border border-border bg-card p-5 shadow-lg shadow-black/40">

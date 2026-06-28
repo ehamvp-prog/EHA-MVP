@@ -94,6 +94,14 @@ export function ComfortProfilePanel() {
   const [savedAt, setSavedAt] = useState<number | null>(null)
   const [confirmOverride, setConfirmOverride] = useState(false)
 
+  // The calculated TARGET comfort score these preferences produce (pure ASHRAE
+  // 55, same math as the dual ring's outer arc). Updates live as sliders move.
+  const month = useMemo(() => monthCst(), [])
+  const targetScore = useMemo(
+    () => comfortFromConditions(form.preferred_temp_f, form.preferred_rh, form, month),
+    [form, month],
+  )
+
   // Did the user change the learned comfort target (temp/humidity)?
   const targetChanged =
     data?.profile != null &&
@@ -178,6 +186,20 @@ export function ComfortProfilePanel() {
           onChange={(v) => set("preferred_rh", v)}
           ticks={["25% (Dry)", "45% (Median)", "65% (Humid)"]}
         />
+
+        {/* Calculated Happy Number — matches the Happy Ring's blue target arc */}
+        <div className="mt-5 flex items-center justify-between gap-3 rounded-xl border border-accent/30 bg-accent/5 px-4 py-3">
+          <div className="flex items-center gap-2.5">
+            <Target className="h-5 w-5 shrink-0 text-accent" />
+            <div>
+              <p className="text-sm font-semibold text-foreground">Your Happy Number</p>
+              <p className="text-xs text-muted-foreground text-pretty">
+                Calculated from these preferences using ASHRAE Standard 55.
+              </p>
+            </div>
+          </div>
+          <span className="text-3xl font-bold tabular-nums text-accent">{targetScore}</span>
+        </div>
       </Card>
 
       {/* Household Demographics */}
@@ -470,7 +492,7 @@ function ComfortRingCard({
   if (isLoading) {
     return (
       <Card>
-        <CardHeader icon={<Gauge className="h-5 w-5 text-ok" />} title="Your Comfort Ring" />
+        <CardHeader icon={<Gauge className="h-5 w-5 text-ok" />} title="Your Happy Ring" />
         <p className="text-sm text-muted">Loading your comfort profile…</p>
       </Card>
     )
@@ -479,9 +501,9 @@ function ComfortRingCard({
   if (hasProfile === false) {
     return (
       <Card>
-        <CardHeader icon={<Gauge className="h-5 w-5 text-ok" />} title="Your Comfort Ring" />
+        <CardHeader icon={<Gauge className="h-5 w-5 text-ok" />} title="Your Happy Ring" />
         <p className="text-sm text-muted-foreground text-pretty">
-          Set your comfort profile in the Comfort Profile tab to see your live comfort ring.
+          Set your comfort profile in the Comfort Profile tab to see your live Happy Ring.
         </p>
       </Card>
     )
@@ -490,7 +512,7 @@ function ComfortRingCard({
   if (reality == null || gapInfo == null) {
     return (
       <Card>
-        <CardHeader icon={<Gauge className="h-5 w-5 text-ok" />} title="Your Comfort Ring" />
+        <CardHeader icon={<Gauge className="h-5 w-5 text-ok" />} title="Your Happy Ring" />
         <p className="text-sm text-muted-foreground">
           Waiting for a live indoor reading to score your comfort…
         </p>
@@ -507,8 +529,8 @@ function ComfortRingCard({
     <Card>
       <CardHeader
         icon={<Gauge className="h-5 w-5 text-ok" />}
-        title="Your Comfort Ring"
-        sub="Pure ASHRAE Standard 55 comfort — your target vs. how your home actually feels right now."
+        title="Your Happy Ring"
+        sub="Pure ASHRAE Standard 55 comfort — your Happy Number vs. your home's live Comfort Score right now."
       />
 
       {!systemRunning ? (
@@ -775,69 +797,98 @@ function DualGauge({
   expanded: boolean
   onToggle: () => void
 }) {
-  const rOuter = 70
-  const rInner = 54
+  const size = 248
+  const c = size / 2
+  const rOuter = 110
+  const rInner = 82
+  const swOuter = 9
+  const swInner = 14
   const cOuter = 2 * Math.PI * rOuter
   const cInner = 2 * Math.PI * rInner
   const pctTarget = Math.max(0, Math.min(100, target)) / 100
   const pctReality = Math.max(0, Math.min(100, reality)) / 100
   const realityStroke =
     realityColor === "ok" ? "var(--color-ok)" : realityColor === "warn" ? "var(--color-warn)" : "var(--color-bad)"
+  const accentStroke = "var(--color-accent)"
 
   const ringEl = (
-    <div className="relative" style={{ width: 180, height: 180 }}>
-      <svg viewBox="0 0 180 180" className="h-full w-full -rotate-90">
-        {/* Outer track + TARGET arc */}
-        <circle cx="90" cy="90" r={rOuter} fill="none" stroke="var(--color-elevated)" strokeWidth="10" />
+    <div className="relative" style={{ width: size, height: size }}>
+      <svg viewBox={`0 0 ${size} ${size}`} className="h-full w-full -rotate-90">
+        {/* Outer track + TARGET arc (slim, blue) */}
+        <circle cx={c} cy={c} r={rOuter} fill="none" stroke="var(--color-elevated)" strokeWidth={swOuter} />
         <circle
-          cx="90"
-          cy="90"
+          cx={c}
+          cy={c}
           r={rOuter}
           fill="none"
-          stroke="var(--color-accent)"
-          strokeWidth="10"
+          stroke={accentStroke}
+          strokeWidth={swOuter}
           strokeLinecap="round"
           strokeDasharray={cOuter}
           strokeDashoffset={cOuter * (1 - pctTarget)}
-          style={{ transition: "stroke-dashoffset 0.6s ease" }}
+          style={{ transition: "stroke-dashoffset 0.7s ease" }}
         />
-        {/* Inner track + REALITY arc */}
-        <circle cx="90" cy="90" r={rInner} fill="none" stroke="var(--color-elevated)" strokeWidth="10" />
+        {/* Inner track + REALITY arc (bold, band-colored) */}
+        <circle cx={c} cy={c} r={rInner} fill="none" stroke="var(--color-elevated)" strokeWidth={swInner} />
         <circle
-          cx="90"
-          cy="90"
+          cx={c}
+          cy={c}
           r={rInner}
           fill="none"
           stroke={realityStroke}
-          strokeWidth="10"
+          strokeWidth={swInner}
           strokeLinecap="round"
           strokeDasharray={cInner}
           strokeDashoffset={cInner * (1 - pctReality)}
-          style={{ transition: "stroke-dashoffset 0.6s ease" }}
+          style={{ transition: "stroke-dashoffset 0.7s ease" }}
         />
       </svg>
       <div className="absolute inset-0 flex flex-col items-center justify-center">
-        <span className="text-5xl font-bold tabular-nums text-foreground">{reality}</span>
-        <span className="text-[11px] text-muted">comfort now</span>
-        <span className="mt-1 flex items-center gap-1 text-xs font-medium text-accent">
-          <Target className="h-3 w-3" /> Target {target}
+        <span className="text-6xl font-bold leading-none tabular-nums" style={{ color: realityStroke }}>
+          {reality}
+        </span>
+        <span className="mt-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          comfort score
         </span>
       </div>
     </div>
   )
 
-  if (!tappable) return ringEl
-
-  return (
+  const ring = tappable ? (
     <button
       type="button"
       onClick={onToggle}
       aria-expanded={expanded}
       aria-label="Explain the comfort gap"
-      className="rounded-full outline-none ring-offset-2 ring-offset-card transition focus-visible:ring-2 focus-visible:ring-primary"
+      className="rounded-full outline-none ring-offset-4 ring-offset-card transition focus-visible:ring-2 focus-visible:ring-primary"
     >
       {ringEl}
     </button>
+  ) : (
+    ringEl
+  )
+
+  return (
+    <div className="flex flex-col items-center">
+      {ring}
+      {/* Legend — numbers color-matched to their arcs */}
+      <div className="mt-4 flex items-center gap-6">
+        <div className="flex items-center gap-2">
+          <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: accentStroke }} aria-hidden="true" />
+          <span className="text-xs text-muted-foreground">Happy Number</span>
+          <span className="text-lg font-bold tabular-nums" style={{ color: accentStroke }}>
+            {target}
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: realityStroke }} aria-hidden="true" />
+          <span className="text-xs text-muted-foreground">Comfort Score</span>
+          <span className="text-lg font-bold tabular-nums" style={{ color: realityStroke }}>
+            {reality}
+          </span>
+        </div>
+      </div>
+    </div>
   )
 }
 

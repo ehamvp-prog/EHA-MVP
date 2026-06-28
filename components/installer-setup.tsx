@@ -3,6 +3,7 @@
 import { useState } from "react"
 import useSWR from "swr"
 import Link from "next/link"
+import { FilterCalibrationWorkflow } from "./filter-health-card"
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
 
@@ -408,7 +409,7 @@ export function InstallerSetup() {
 
         <Section
           title="Automation"
-          blurb="Let Elevate act on the thermostat to keep the home comfortable and dodge peak-hour costs. Everything is OFF by default — turn on only what this home is enrolled in. When connected, Elevate adjusts automatically; without a thermostat connection these become recommendations only."
+          blurb="Let Elevate act on the thermostat to keep the home comfortable and dodge peak-hour costs. These run automatically in the background around the clock — even when the app is closed. Everything is OFF by default — turn on only what this home is enrolled in. When connected, Elevate adjusts automatically; without a thermostat connection these become recommendations only."
         >
           <Toggle
             label="Automatic Comfort Adjustment"
@@ -477,6 +478,15 @@ export function InstallerSetup() {
               />
             </>
           ) : null}
+        </Section>
+
+        <Section
+          title="Filter Health Baseline"
+          blurb="Capture this system's static-pressure baseline so the homeowner's Filter Health gauge can track filter load. Remove the filter for the first reading, install a fresh one for the second. Every future filter change re-runs this, which also builds a long-term evaporator-coil fouling baseline."
+        >
+          <div className="sm:col-span-2">
+            <FilterCalibrationWorkflow />
+          </div>
         </Section>
 
         <Section title="Utility Rate" blurb="Confirms which Evergy rate plan this home is on for cost calculations.">

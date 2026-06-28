@@ -4,11 +4,37 @@ import { runAutomationTick } from "@/lib/automation/engine"
 export const dynamic = "force-dynamic"
 export const maxDuration = 30
 
-// Drives one automation evaluation. Called on a cadence from the client (like
-// /api/compute/persist) since there is no server cron here. The engine itself
-// enforces cooldowns, peak windows, the safety band, and once-per-day guards,
-// so calling this more often than needed is safe and idempotent.
-export async function POST() {
+// =====================================================================
+// Automation tick  ->  POST /api/automation/tick
+//
+// CRON-ONLY. This endpoint is the single, always-on trigger for the
+// automation engine. It is invoked every 5 minutes by a Supabase
+// pg_cron job (via pg_net.http_post) so automation runs server-side
+// around the clock, whether or not anyone has the app open.
+//
+// It is secured exactly like the telemetry ingest route: the caller
+// must send "Authorization: Bearer <AUTOMATION_TICK_SECRET>". No other
+// trigger path exists — the client never calls this.
+// =====================================================================
+
+export async function POST(request: Request) {
+  const secret = process.env.AUTOMATION_TICK_SECRET
+  if (!secret) {
+    return NextResponse.json(
+      { ok: false, error: "Server is missing AUTOMATION_TICK_SECRET." },
+      { status: 500 },
+    )
+  }
+
+  const authHeader = request.headers.get("authorization") ?? ""
+  const provided = authHeader.replace(/^Bearer\s+/i, "").trim()
+  if (provided !== secret) {
+    return NextResponse.json(
+      { ok: false, error: "Unauthorized. Bad or missing Bearer secret." },
+      { status: 401 },
+    )
+  }
+
   try {
     const result = await runAutomationTick()
     return NextResponse.json({ ok: true, ...result })
