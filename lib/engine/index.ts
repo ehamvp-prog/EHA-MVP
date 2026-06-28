@@ -159,6 +159,7 @@ export function runEngine(
     blowerModel: profile?.blower_model,
     ecmProfile: profile?.ecm_profile,
     blowerSpeedTap: profile?.blower_speed_tap,
+    blowerWatts: inputs.blowerWatts,
   })
 
   const capacity = capacityFromAirSide(airflow.cfm, returnState, supplyState)
