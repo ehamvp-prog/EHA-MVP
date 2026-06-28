@@ -85,6 +85,44 @@ function Select({
   )
 }
 
+// Master enrollment toggle with a switch control + helper text.
+function Toggle({
+  label,
+  hint,
+  checked,
+  onChange,
+}: {
+  label: string
+  hint: string
+  checked: boolean
+  onChange: (v: boolean) => void
+}) {
+  return (
+    <label className="flex cursor-pointer items-start justify-between gap-3 sm:col-span-2">
+      <span className="flex flex-col gap-0.5">
+        <span className="text-sm font-medium text-foreground">{label}</span>
+        <span className="text-xs leading-relaxed text-muted">{hint}</span>
+      </span>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-label={label}
+        onClick={() => onChange(!checked)}
+        className={`relative mt-0.5 h-6 w-11 shrink-0 rounded-full border transition-colors ${
+          checked ? "border-primary bg-primary" : "border-border bg-elevated"
+        }`}
+      >
+        <span
+          className={`absolute top-0.5 h-4 w-4 rounded-full bg-background transition-transform ${
+            checked ? "translate-x-5" : "translate-x-0.5"
+          }`}
+        />
+      </button>
+    </label>
+  )
+}
+
 function Section({ title, blurb, children }: { title: string; blurb: string; children: React.ReactNode }) {
   return (
     <section className="rounded-2xl border border-border bg-card p-5 shadow-panel">
@@ -111,6 +149,18 @@ const FIELD_KEYS = [
   "ecm_profile",
   "cfm_per_ton",
   "weather_zip",
+  // Automation tuning (revealed when a toggle is on).
+  "auto_comfort_temp_min_f",
+  "auto_comfort_temp_max_f",
+  "peak_dodger_precool_offset_f",
+  "peak_dodger_coast_offset_f",
+] as const
+
+// Automation enrollment toggles (booleans, default OFF).
+const TOGGLE_KEYS = [
+  "auto_comfort_enabled",
+  "auto_comfort_fan_enabled",
+  "peak_dodger_enabled",
 ] as const
 
 export function InstallerSetup() {
@@ -123,6 +173,7 @@ export function InstallerSetup() {
 
   const [form, setForm] = useState<Record<string, string>>({})
   const [rtou, setRtou] = useState(false)
+  const [toggles, setToggles] = useState<Record<string, boolean>>({})
   const [touched, setTouched] = useState(false)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState<{ kind: "ok" | "bad"; text: string } | null>(null)
@@ -135,6 +186,14 @@ export function InstallerSetup() {
     }
     setForm(next)
     setRtou(Boolean(p.evergy_rtou_confirmed))
+    const t: Record<string, boolean> = {}
+    for (const k of TOGGLE_KEYS) t[k] = Boolean(p[k])
+    setToggles(t)
+  }
+
+  function toggle(name: string, value: boolean) {
+    setTouched(true)
+    setToggles((t) => ({ ...t, [name]: value }))
   }
 
   function set(name: string, value: string) {
@@ -150,7 +209,7 @@ export function InstallerSetup() {
       const res = await fetch("/api/profile", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...form, evergy_rtou_confirmed: rtou }),
+        body: JSON.stringify({ ...form, ...toggles, evergy_rtou_confirmed: rtou }),
       })
       const json = await res.json()
       if (!json.ok) {
@@ -345,6 +404,79 @@ export function InstallerSetup() {
             value={v("seer2_conversion_factor")}
             onChange={set}
           />
+        </Section>
+
+        <Section
+          title="Automation"
+          blurb="Let Elevate act on the thermostat to keep the home comfortable and dodge peak-hour costs. Everything is OFF by default — turn on only what this home is enrolled in. When connected, Elevate adjusts automatically; without a thermostat connection these become recommendations only."
+        >
+          <Toggle
+            label="Automatic Comfort Adjustment"
+            hint="When the home drifts out of comfort, Elevate nudges the thermostat back toward the learned target — never outside the safety band below."
+            checked={Boolean(toggles.auto_comfort_enabled)}
+            onChange={(v) => toggle("auto_comfort_enabled", v)}
+          />
+          {toggles.auto_comfort_enabled ? (
+            <>
+              <Field
+                label="Lowest allowed temperature"
+                hint="Automation will never cool below this, for any reason."
+                name="auto_comfort_temp_min_f"
+                type="number"
+                unit="°F"
+                placeholder="68"
+                value={v("auto_comfort_temp_min_f")}
+                onChange={set}
+              />
+              <Field
+                label="Highest allowed temperature"
+                hint="Automation will never let the home rise above this, for any reason."
+                name="auto_comfort_temp_max_f"
+                type="number"
+                unit="°F"
+                placeholder="78"
+                value={v("auto_comfort_temp_max_f")}
+                onChange={set}
+              />
+              <Toggle
+                label="Allow fan circulation"
+                hint="Let Elevate run the thermostat fan for short bursts to improve comfort through circulation (energy-efficient)."
+                checked={Boolean(toggles.auto_comfort_fan_enabled)}
+                onChange={(v) => toggle("auto_comfort_fan_enabled", v)}
+              />
+            </>
+          ) : null}
+
+          <Toggle
+            label="Peak Dodger"
+            hint="Pre-cools before Evergy peak hours (4–8 PM) so the system coasts through the expensive window. Skips weekends and holidays automatically."
+            checked={Boolean(toggles.peak_dodger_enabled)}
+            onChange={(v) => toggle("peak_dodger_enabled", v)}
+          />
+          {toggles.peak_dodger_enabled ? (
+            <>
+              <Field
+                label="Pre-cool amount"
+                hint="How many degrees to pre-cool before peak, banking coolness in the home's thermal mass."
+                name="peak_dodger_precool_offset_f"
+                type="number"
+                unit="°F"
+                placeholder="3"
+                value={v("peak_dodger_precool_offset_f")}
+                onChange={set}
+              />
+              <Field
+                label="Coast amount"
+                hint="How many degrees to ease off during peak so the compressor barely runs (still clamped to the band above)."
+                name="peak_dodger_coast_offset_f"
+                type="number"
+                unit="°F"
+                placeholder="3"
+                value={v("peak_dodger_coast_offset_f")}
+                onChange={set}
+              />
+            </>
+          ) : null}
         </Section>
 
         <Section title="Utility Rate" blurb="Confirms which Evergy rate plan this home is on for cost calculations.">
