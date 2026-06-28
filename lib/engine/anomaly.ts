@@ -37,6 +37,10 @@ export type WeatherConfidence = "high" | "medium" | "low" | null
 export interface AnomalyInput {
   liveEer: number | null
   totalWatts: number | null
+  // Corroborated running state (condenser power OR blower OR delta-T). When
+  // provided it overrides the simple watts gate below, so a single missed
+  // power reading can no longer force a false "idle"/"off" verdict.
+  systemRunning?: boolean
   outdoorTempF: number | null
   weatherConfidence: WeatherConfidence
   baseline: BaselineSample[]
@@ -106,18 +110,21 @@ export function assessAnomaly(input: AnomalyInput): AnomalyResult {
     note: "",
   })
 
-  // 1. Is the system actually cooling? If not, there is nothing to judge.
-  if (totalWatts == null || totalWatts < RUNNING_WATTS_MIN) {
+  // 1. Is the system actually cooling? Prefer the corroborated multi-signal
+  //    running state; fall back to the watts gate only if it wasn't supplied.
+  const running =
+    input.systemRunning ?? (totalWatts != null && totalWatts >= RUNNING_WATTS_MIN)
+  if (!running) {
     return { ...base(0), color: "idle", note: "System is not actively cooling." }
   }
 
-  // 2. Running, but we couldn't compute EER (e.g. airflow fell back, no
-  //    capacity). Be honest: unknown, not a color verdict.
+  // 2. Running, but we couldn't compute EER (e.g. no supply-air sensor, or
+  //    airflow fell back). Be honest: unknown, not a color verdict.
   if (liveEer == null) {
     return {
       ...base(0),
       color: "unknown",
-      note: "System is running but efficiency can't be measured yet (airflow not established).",
+      note: "System is running, but efficiency can't be measured right now.",
     }
   }
 

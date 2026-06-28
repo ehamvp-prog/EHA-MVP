@@ -13,6 +13,7 @@ import { capacityFromAirSide } from "./capacity"
 import { computeEfficiency } from "./seer2"
 import { extractHvacInputs, type LatestDevice } from "./extract"
 import { deriveCoilState, type CoilState } from "./coil-state"
+import { deriveSystemState, type SystemRunState, type SensorFault } from "./system-state"
 import { computeCost, type TouPeriod, type Season } from "./cost"
 import {
   assessAnomaly,
@@ -59,6 +60,12 @@ export interface ComputedReading {
   // Derived live state (never set by hand)
   coil_state: CoilState
 
+  // Corroborated run-state + sensor fault flags
+  system_running: boolean
+  system_state: SystemRunState
+  cooling_delta_f: number | null
+  sensor_faults: SensorFault[]
+
   // Live Evergy RTOU cost (tariff energy only; riders excluded)
   tou_season: Season
   tou_period: TouPeriod
@@ -85,6 +92,8 @@ export interface ComputedReading {
     seer2FactorSource: string
     ratedSeer2: number | null
     coilStateNote: string
+    systemStateNote: string
+    systemBasis: string[]
     pressureSource: string
     anomalyNote: string
     anomalyDeviationPct: number | null
@@ -132,6 +141,16 @@ export function runEngine(
     supplyRh: inputs.supplyRh,
   })
 
+  // Corroborated run-state: condenser power OR blower energized OR a real
+  // temperature drop. Also surfaces sensor-fault flags on disagreement.
+  const systemState = deriveSystemState({
+    condenserTotalWatts: inputs.condenserTotalWatts,
+    blowerWatts: inputs.blowerWatts,
+    returnTempF: inputs.returnTempF,
+    supplyTempF: inputs.supplyTempF,
+    staticInWc: inputs.staticInWc,
+  })
+
   const airflow = deriveAirflow({
     staticInWc: inputs.staticInWc,
     tonnage: profile?.system_tonnage,
@@ -162,6 +181,7 @@ export function runEngine(
   const anomaly = assessAnomaly({
     liveEer: eff.liveEer,
     totalWatts: eff.totalWatts,
+    systemRunning: systemState.running,
     outdoorTempF,
     weatherConfidence,
     baseline: options.baselineSamples ?? [],
@@ -189,6 +209,11 @@ export function runEngine(
 
     coil_state: coil.state,
 
+    system_running: systemState.running,
+    system_state: systemState.state,
+    cooling_delta_f: systemState.coolingDeltaF,
+    sensor_faults: systemState.faults,
+
     tou_season: cost.season,
     tou_period: cost.tou_period,
     rate_per_kwh: cost.rate_per_kwh,
@@ -210,6 +235,8 @@ export function runEngine(
       seer2FactorSource: eff.seer2FactorSource,
       ratedSeer2: profile?.rated_seer2 ?? null,
       coilStateNote: coil.note,
+      systemStateNote: systemState.note,
+      systemBasis: systemState.basis,
       pressureSource,
       anomalyNote: anomaly.note,
       anomalyDeviationPct: anomaly.deviationPct,

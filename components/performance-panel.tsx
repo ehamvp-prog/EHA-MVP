@@ -21,11 +21,16 @@ type Computed = {
   outdoor_temp_f: number | null
   weather_confidence: string | null
   efficiency_color: string
+  system_running: boolean
+  system_state: "cooling" | "off" | "fault"
+  cooling_delta_f: number | null
+  sensor_faults: { code: string; severity: "warn" | "fault"; message: string }[]
   diagnostics: {
     ratedSeer2: number | null
     anomalyNote: string
     coilStateNote: string
     airflowNote: string
+    systemStateNote: string
   }
 }
 
@@ -39,8 +44,8 @@ const VERDICT: Record<
   orange: { accent: "orange", dot: "bg-orange glow-orange", title: "Underperforming", sub: "Clearly below the healthy baseline. Worth a look." },
   red: { accent: "bad", dot: "bg-bad glow-bad", title: "Needs attention", sub: "Well below the healthy baseline for these conditions." },
   learning: { accent: "primary", dot: "bg-primary glow-primary", title: "Learning your system", sub: "Building a healthy baseline. Color verdicts begin once there's enough history." },
-  idle: { accent: "primary", dot: "bg-muted", title: "System is off", sub: "The condenser isn't running, so there's nothing to score right now." },
-  unknown: { accent: "primary", dot: "bg-muted", title: "Not enough data", sub: "Some live readings are missing, so efficiency can't be scored yet." },
+  idle: { accent: "primary", dot: "bg-muted", title: "System is off", sub: "No condenser power, blower power, or temperature drop detected — nothing to score right now." },
+  unknown: { accent: "primary", dot: "bg-primary glow-primary", title: "Running — measuring", sub: "The system is actively cooling, but efficiency can't be scored yet (a supply-air reading is needed)." },
 }
 
 const PERIOD_LABEL: Record<string, string> = {
@@ -78,7 +83,14 @@ export function PerformancePanel() {
   }, [])
 
   const c = data?.computed
-  const verdict = VERDICT[c?.efficiency_color ?? "learning"] ?? VERDICT.learning
+  const faults = c?.sensor_faults ?? []
+  const hasHardFault = faults.some((f) => f.severity === "fault")
+  // A hard sensor fault takes visual priority over the efficiency color so a
+  // contradiction (e.g. compressor on, blower reads 0 W) is never hidden.
+  const verdict =
+    c?.system_state === "fault" && hasHardFault
+      ? { accent: "bad" as const, dot: "bg-bad glow-bad", title: "Sensor issue detected", sub: "The system appears to be cooling, but the sensors disagree. See the details below." }
+      : VERDICT[c?.efficiency_color ?? "learning"] ?? VERDICT.learning
 
   const tons = c?.capacity_btuh != null ? c.capacity_btuh / 12000 : null
   const eer = c?.live_eer ?? null
