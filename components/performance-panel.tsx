@@ -22,7 +22,7 @@ type Computed = {
   weather_confidence: string | null
   efficiency_color: string
   system_running: boolean
-  system_state: "cooling" | "off" | "fault"
+  system_state: "cooling" | "fan_only" | "off" | "fault"
   cooling_delta_f: number | null
   sensor_faults: { code: string; severity: "warn" | "fault"; message: string }[]
   diagnostics: {
@@ -90,7 +90,9 @@ export function PerformancePanel() {
   const verdict =
     c?.system_state === "fault" && hasHardFault
       ? { accent: "bad" as const, dot: "bg-bad glow-bad", title: "Sensor issue detected", sub: "The system appears to be cooling, but the sensors disagree. See the details below." }
-      : VERDICT[c?.efficiency_color ?? "learning"] ?? VERDICT.learning
+      : c?.system_state === "fan_only"
+        ? { accent: "primary" as const, dot: "bg-primary glow-primary", title: "Fan running", sub: "The blower is circulating air, but the compressor is off — no active cooling to score right now." }
+        : VERDICT[c?.efficiency_color ?? "learning"] ?? VERDICT.learning
 
   const tons = c?.capacity_btuh != null ? c.capacity_btuh / 12000 : null
   const eer = c?.live_eer ?? null
