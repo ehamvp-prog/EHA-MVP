@@ -21,11 +21,16 @@ type Computed = {
   outdoor_temp_f: number | null
   weather_confidence: string | null
   efficiency_color: string
+  system_running: boolean
+  system_state: "cooling" | "fan_only" | "off" | "fault"
+  cooling_delta_f: number | null
+  sensor_faults: { code: string; severity: "warn" | "fault"; message: string }[]
   diagnostics: {
     ratedSeer2: number | null
     anomalyNote: string
     coilStateNote: string
     airflowNote: string
+    systemStateNote: string
   }
 }
 
@@ -39,8 +44,8 @@ const VERDICT: Record<
   orange: { accent: "orange", dot: "bg-orange glow-orange", title: "Underperforming", sub: "Clearly below the healthy baseline. Worth a look." },
   red: { accent: "bad", dot: "bg-bad glow-bad", title: "Needs attention", sub: "Well below the healthy baseline for these conditions." },
   learning: { accent: "primary", dot: "bg-primary glow-primary", title: "Learning your system", sub: "Building a healthy baseline. Color verdicts begin once there's enough history." },
-  idle: { accent: "primary", dot: "bg-muted", title: "System is off", sub: "The condenser isn't running, so there's nothing to score right now." },
-  unknown: { accent: "primary", dot: "bg-muted", title: "Not enough data", sub: "Some live readings are missing, so efficiency can't be scored yet." },
+  idle: { accent: "primary", dot: "bg-muted", title: "System is off", sub: "No condenser power, blower power, or temperature drop detected — nothing to score right now." },
+  unknown: { accent: "primary", dot: "bg-primary glow-primary", title: "Running — measuring", sub: "The system is actively cooling, but efficiency can't be scored yet." },
 }
 
 const PERIOD_LABEL: Record<string, string> = {
@@ -78,7 +83,18 @@ export function PerformancePanel() {
   }, [])
 
   const c = data?.computed
-  const verdict = VERDICT[c?.efficiency_color ?? "learning"] ?? VERDICT.learning
+  const faults = c?.sensor_faults ?? []
+  const hasHardFault = faults.some((f) => f.severity === "fault")
+  // A hard sensor fault takes visual priority over the efficiency color so a
+  // contradiction (e.g. compressor on, blower reads 0 W) is never hidden.
+  const verdict =
+    c?.system_state === "fault" && hasHardFault
+      ? { accent: "bad" as const, dot: "bg-bad glow-bad", title: "Sensor issue detected", sub: "The system appears to be cooling, but the sensors disagree. See the details below." }
+      : c?.system_state === "fan_only"
+        ? { accent: "primary" as const, dot: "bg-primary glow-primary", title: "Fan running", sub: "The blower is circulating air, but the compressor is off — no active cooling to score right now." }
+        : c?.efficiency_color === "unknown" && c?.diagnostics?.airflowNote
+          ? { ...VERDICT.unknown, sub: `The system is actively cooling, but efficiency can't be scored yet — ${c.diagnostics.airflowNote}.` }
+          : VERDICT[c?.efficiency_color ?? "learning"] ?? VERDICT.learning
 
   const tons = c?.capacity_btuh != null ? c.capacity_btuh / 12000 : null
   const eer = c?.live_eer ?? null
@@ -114,6 +130,35 @@ export function PerformancePanel() {
           </div>
         </div>
       </div>
+
+      {/* Sensor-fault banner — shown only when signals disagree */}
+      {faults.length > 0 ? (
+        <ul className="flex flex-col gap-2" aria-label="Sensor alerts">
+          {faults.map((f) => (
+            <li
+              key={f.code}
+              className={`flex items-start gap-3 rounded-xl border px-4 py-3 text-sm ${
+                f.severity === "fault"
+                  ? "border-bad/40 bg-bad/10 text-foreground"
+                  : "border-warn/40 bg-warn/10 text-foreground"
+              }`}
+            >
+              <span
+                className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${
+                  f.severity === "fault" ? "bg-bad glow-bad" : "bg-warn glow-warn"
+                }`}
+                aria-hidden
+              />
+              <span className="text-pretty">
+                <span className="font-semibold capitalize">
+                  {f.severity === "fault" ? "Sensor fault" : "Check"}:
+                </span>{" "}
+                {f.message}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
 
       {/* Performance gauges */}
       <div className="rounded-2xl border border-border bg-card p-4 shadow-lg shadow-black/40">
