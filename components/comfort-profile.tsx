@@ -797,10 +797,10 @@ function DualGauge({
   expanded: boolean
   onToggle: () => void
 }) {
-  const size = 196
+  const size = 248
   const c = size / 2
-  const rOuter = 84
-  const rInner = 60
+  const rOuter = 110
+  const rInner = 82
   const swOuter = 9
   const swInner = 14
   const cOuter = 2 * Math.PI * rOuter
