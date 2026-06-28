@@ -104,6 +104,7 @@ export function HomeView() {
   )
   const { data: history } = useSWR<{
     days: { day: string; spend: number }[]
+    hours: { hour: number; spend: number; tou: string }[]
     week_to_date: number
     today: number
   }>("/api/cost/history", fetcher, { refreshInterval: 60000 })
@@ -156,7 +157,9 @@ export function HomeView() {
             ⌄
           </span>
         </button>
-        {historyOpen ? <CostHistory days={history?.days ?? []} /> : null}
+        {historyOpen ? (
+          <CostChart days={history?.days ?? []} hours={history?.hours ?? []} />
+        ) : null}
       </div>
 
       {/* 3. Efficiency */}
@@ -261,47 +264,285 @@ function TempTile({ label, value }: { label: string; value: string }) {
   )
 }
 
-// Simple CSS bar chart of daily energy spend. Blue accent (interactive color)
-// when expanded, consistent with the rest of the app.
-function CostHistory({ days }: { days: { day: string; spend: number }[] }) {
-  if (days.length === 0) {
-    return (
-      <p className="mt-3 rounded-xl border border-border bg-elevated px-4 py-6 text-center text-sm text-muted">
-        Daily spending will appear here as your system runs over the coming days.
-      </p>
-    )
+// ---- Cost-over-time chart -------------------------------------------------
+// Three granularities (Daily/Weekly/Monthly), labeled SVG axes, and TOU rate
+// bands behind the daily bars. Blue accent when expanded, matching the app.
+
+type ChartMode = "daily" | "weekly" | "monthly"
+type Bar = { key: string; label: string; show: boolean; value: number; tou?: string }
+
+// Round a value up to a clean axis maximum (1/2/5 × 10ⁿ).
+function niceMax(v: number): number {
+  if (v <= 0) return 0.1
+  const pow = Math.pow(10, Math.floor(Math.log10(v)))
+  const n = v / pow
+  const step = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10
+  return step * pow
+}
+
+function hourLabel(h: number): string {
+  if (h === 0) return "12a"
+  if (h === 12) return "12p"
+  return h < 12 ? `${h}a` : `${h - 12}p`
+}
+
+// Local YYYY-MM-DD (Central) → short weekday + day, e.g. "Sat 27".
+function dayShortLabel(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number)
+  const dt = new Date(Date.UTC(y, m - 1, d))
+  const wd = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][dt.getUTCDay()]
+  return `${wd} ${d}`
+}
+
+function CostChart({
+  days,
+  hours,
+}: {
+  days: { day: string; spend: number }[]
+  hours: { hour: number; spend: number; tou: string }[]
+}) {
+  const [mode, setMode] = useState<ChartMode>("daily")
+
+  const title =
+    mode === "daily"
+      ? "Today's spending by hour"
+      : mode === "weekly"
+        ? "This week's spending"
+        : "This month's spending"
+
+  // Build the bar set + a fallback message for the active mode.
+  let bars: Bar[] = []
+  let fallback: string | null = null
+  let yUnitDigits = 2
+
+  if (mode === "daily") {
+    const byHour = new Map(hours.map((h) => [h.hour, h]))
+    // Today's weekday in Central time decides whether on-peak applies.
+    const nowCst = new Date(Date.now() - 6 * 60 * 60 * 1000)
+    const dow = nowCst.getUTCDay() // 0 Sun … 6 Sat
+    const isWeekday = dow >= 1 && dow <= 5
+    bars = Array.from({ length: 24 }, (_, h) => {
+      const rec = byHour.get(h)
+      const tou =
+        h < 6 ? "super_off_peak" : isWeekday && h >= 16 && h < 20 ? "on_peak" : "off_peak"
+      return {
+        key: `h${h}`,
+        label: hourLabel(h),
+        show: h % 6 === 0 || h === 23,
+        value: rec?.spend ?? 0,
+        tou,
+      }
+    })
+    if (!bars.some((b) => b.value > 0)) {
+      fallback = "No runtime recorded yet today. Your hourly spending will appear here as the system runs."
+    }
+  } else if (mode === "weekly") {
+    const recent = days.slice(-7)
+    if (recent.length < 2) {
+      fallback = "Still collecting — check back in a day or two."
+    } else {
+      bars = recent.map((d) => ({
+        key: d.day,
+        label: dayShortLabel(d.day),
+        show: true,
+        value: d.spend,
+      }))
+    }
+  } else {
+    // Monthly: all days in the current calendar month (Central).
+    const nowCst = new Date(Date.now() - 6 * 60 * 60 * 1000)
+    const ym = `${nowCst.getUTCFullYear()}-${String(nowCst.getUTCMonth() + 1).padStart(2, "0")}`
+    const monthDays = days.filter((d) => d.day.startsWith(ym))
+    if (monthDays.length < 2) {
+      fallback = "Still collecting — check back in a day or two."
+    } else {
+      bars = monthDays.map((d) => ({
+        key: d.day,
+        label: String(Number(d.day.slice(8, 10))),
+        show: true,
+        value: d.spend,
+      }))
+    }
   }
-  const max = Math.max(...days.map((d) => d.spend), 0.01)
-  const dayWord = days.length === 1 ? "day" : "days"
+
   return (
-    <div className="mt-3 rounded-xl border border-accent/30 bg-elevated p-4">
-      {/* Bar track — bars are direct children of the fixed-height row so their
-          percentage heights resolve against it. */}
-      <div className="flex items-end gap-1" style={{ height: 120 }}>
-        {days.map((d) => {
-          const pct = Math.max((d.spend / max) * 100, 3)
+    <div className="mt-3 rounded-xl border border-accent/40 bg-elevated p-4">
+      {/* Granularity toggle */}
+      <div
+        className="mb-3 flex items-center gap-1 rounded-lg border border-border bg-card p-0.5"
+        role="tablist"
+        aria-label="Spending range"
+      >
+        {(["daily", "weekly", "monthly"] as ChartMode[]).map((m) => (
+          <button
+            key={m}
+            type="button"
+            role="tab"
+            aria-selected={mode === m}
+            onClick={() => setMode(m)}
+            className={`flex-1 rounded-md px-2 py-1 text-xs font-medium capitalize transition-colors ${
+              mode === m ? "bg-accent text-accent-foreground" : "text-muted hover:text-foreground"
+            }`}
+          >
+            {m}
+          </button>
+        ))}
+      </div>
+
+      <h4 className="mb-2 text-center text-sm font-semibold text-foreground">{title}</h4>
+
+      {fallback ? (
+        <p className="rounded-lg border border-border bg-card px-4 py-8 text-center text-sm text-muted">
+          {fallback}
+        </p>
+      ) : (
+        <>
+          <BarChartSvg bars={bars} digits={yUnitDigits} showBands={mode === "daily"} />
+          {mode === "daily" ? <TouLegend /> : null}
+        </>
+      )}
+    </div>
+  )
+}
+
+// Pure SVG bar chart with labeled $ y-axis, time x-axis, and optional TOU bands.
+function BarChartSvg({
+  bars,
+  digits,
+  showBands,
+}: {
+  bars: Bar[]
+  digits: number
+  showBands: boolean
+}) {
+  const W = 340
+  const H = 200
+  const ml = 38
+  const mr = 8
+  const mt = 10
+  const mb = 22
+  const plotX0 = ml
+  const plotX1 = W - mr
+  const plotW = plotX1 - plotX0
+  const plotY0 = mt
+  const plotY1 = H - mb
+  const plotH = plotY1 - plotY0
+
+  const rawMax = Math.max(...bars.map((b) => b.value), 0)
+  const yMax = niceMax(rawMax)
+  const n = bars.length
+  const slot = plotW / n
+  const barW = Math.max(slot * 0.62, 2)
+  const yOf = (v: number) => plotY1 - (v / yMax) * plotH
+
+  const ticks = [0, yMax / 2, yMax]
+  const bandColor: Record<string, string> = {
+    super_off_peak: "rgba(41, 209, 126, 0.10)",
+    on_peak: "rgba(245, 128, 61, 0.12)",
+    off_peak: "transparent",
+  }
+
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      className="w-full"
+      role="img"
+      aria-label="Spending bar chart"
+      style={{ height: "auto" }}
+    >
+      {/* TOU rate bands behind bars (daily only) */}
+      {showBands &&
+        bars.map((b, i) => {
+          const fill = bandColor[b.tou ?? "off_peak"]
+          if (fill === "transparent") return null
           return (
-            <div
-              key={d.day}
-              className="flex-1 rounded-t bg-accent transition-all"
-              style={{ height: `${pct}%` }}
-              title={`${d.day}: ${money(d.spend)}`}
-              aria-hidden
+            <rect
+              key={`band-${b.key}`}
+              x={plotX0 + i * slot}
+              y={plotY0}
+              width={slot}
+              height={plotH}
+              fill={fill}
             />
           )
         })}
-      </div>
-      {/* Day labels, aligned 1:1 under the bars */}
-      <div className="mt-1 flex gap-1">
-        {days.map((d) => (
-          <span key={d.day} className="flex-1 text-center text-[9px] tabular-nums text-muted">
-            {d.day.slice(8, 10)}
-          </span>
-        ))}
-      </div>
-      <p className="mt-2 text-center text-xs text-muted-foreground">
-        Daily energy spend (last {days.length} {dayWord})
-      </p>
+
+      {/* Y gridlines + $ labels */}
+      {ticks.map((t, i) => {
+        const y = yOf(t)
+        return (
+          <g key={`tick-${i}`}>
+            <line x1={plotX0} y1={y} x2={plotX1} y2={y} stroke="var(--color-border)" strokeWidth={1} />
+            <text
+              x={plotX0 - 5}
+              y={y + 3}
+              textAnchor="end"
+              fontSize={9}
+              fill="var(--color-muted)"
+            >
+              {`$${t.toFixed(digits)}`}
+            </text>
+          </g>
+        )
+      })}
+
+      {/* Bars */}
+      {bars.map((b, i) => {
+        const x = plotX0 + i * slot + (slot - barW) / 2
+        const y = yOf(b.value)
+        const h = b.value > 0 ? Math.max(plotY1 - y, 1.5) : 0
+        return (
+          <rect
+            key={b.key}
+            x={x}
+            y={y}
+            width={barW}
+            height={h}
+            rx={1.5}
+            fill="var(--color-accent)"
+          >
+            <title>{`${b.label}: $${b.value.toFixed(Math.max(digits, 2))}`}</title>
+          </rect>
+        )
+      })}
+
+      {/* X axis line */}
+      <line x1={plotX0} y1={plotY1} x2={plotX1} y2={plotY1} stroke="var(--color-border)" strokeWidth={1} />
+
+      {/* X labels (subset where show=true) */}
+      {bars.map((b, i) =>
+        b.show ? (
+          <text
+            key={`xl-${b.key}`}
+            x={plotX0 + i * slot + slot / 2}
+            y={plotY1 + 13}
+            textAnchor="middle"
+            fontSize={9}
+            fill="var(--color-muted)"
+          >
+            {b.label}
+          </text>
+        ) : null,
+      )}
+    </svg>
+  )
+}
+
+function TouLegend() {
+  return (
+    <div className="mt-2 flex items-center justify-center gap-4 text-[10px] text-muted">
+      <span className="flex items-center gap-1.5">
+        <span className="h-2.5 w-2.5 rounded-sm" style={{ background: "rgba(41, 209, 126, 0.35)" }} aria-hidden />
+        Super off-peak
+      </span>
+      <span className="flex items-center gap-1.5">
+        <span className="h-2.5 w-2.5 rounded-sm border border-border" aria-hidden />
+        Off-peak
+      </span>
+      <span className="flex items-center gap-1.5">
+        <span className="h-2.5 w-2.5 rounded-sm" style={{ background: "rgba(245, 128, 61, 0.4)" }} aria-hidden />
+        On-peak
+      </span>
     </div>
   )
 }

@@ -24,17 +24,27 @@ function cstToday(): string {
 export async function GET() {
   try {
     const supabase = createAdminClient()
-    const { data, error } = await supabase.rpc("daily_cost_history", {
-      p_site_id: SITE_ID,
-      p_days: 31,
-    })
-    if (error) throw error
+    const [daily, hourly] = await Promise.all([
+      supabase.rpc("daily_cost_history", { p_site_id: SITE_ID, p_days: 31 }),
+      supabase.rpc("hourly_cost_today", { p_site_id: SITE_ID }),
+    ])
+    if (daily.error) throw daily.error
+    if (hourly.error) throw hourly.error
 
     const days: { day: string; spend: number }[] = (
-      (data ?? []) as { day: string; spend: number | string }[]
+      (daily.data ?? []) as { day: string; spend: number | string }[]
     ).map((r) => ({
       day: String(r.day),
       spend: Number(r.spend ?? 0),
+    }))
+
+    // Today's per-hour spend + dominant TOU period (0..23 filled on client).
+    const hours: { hour: number; spend: number; tou: string }[] = (
+      (hourly.data ?? []) as { hour: number; avg_cost: number | string; tou_period: string | null }[]
+    ).map((r) => ({
+      hour: Number(r.hour),
+      spend: Number(r.avg_cost ?? 0),
+      tou: String(r.tou_period ?? "off_peak"),
     }))
 
     // Sum the trailing 7 calendar days (energy only) for the "this week" tile.
@@ -51,6 +61,7 @@ export async function GET() {
     return NextResponse.json({
       ok: true,
       days,
+      hours,
       week_to_date: weekToDate,
       today: todaySpend,
     })
