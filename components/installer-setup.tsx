@@ -408,7 +408,7 @@ export function InstallerSetup() {
 
         <Section
           title="Automation"
-          blurb="Let Elevate act on the thermostat to keep the home comfortable and dodge peak-hour costs. Everything is OFF by default — turn on only what this home is enrolled in. When connected, Elevate adjusts automatically; without a thermostat connection these become recommendations only."
+          blurb="Let Elevate act on the thermostat to keep the home comfortable and dodge peak-hour costs. These run automatically in the background around the clock — even when the app is closed. Everything is OFF by default — turn on only what this home is enrolled in. When connected, Elevate adjusts automatically; without a thermostat connection these become recommendations only."
         >
           <Toggle
             label="Automatic Comfort Adjustment"

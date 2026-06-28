@@ -121,15 +121,10 @@ export function HomeView() {
     return () => clearInterval(id)
   }, [])
 
-  // Drive the automation engine on a 5-minute cadence (no server cron here).
-  // The engine self-guards with cooldowns, peak windows, and once-per-day
-  // checks, so an extra call on mount is safe and idempotent.
-  useEffect(() => {
-    const tick = () => fetch("/api/automation/tick", { method: "POST" }).catch(() => {})
-    tick()
-    const id = setInterval(tick, 300000)
-    return () => clearInterval(id)
-  }, [])
+  // NOTE: The automation engine is NOT triggered from the client. It runs
+  // server-side on a Supabase pg_cron schedule (every 5 min) so it works even
+  // when the app is closed. Home View only READS the journal + live comfort
+  // numbers through the normal SWR fetches below.
 
   const [historyOpen, setHistoryOpen] = useState(false)
   const [subTab, setSubTab] = useState<"home" | "comfort">("home")

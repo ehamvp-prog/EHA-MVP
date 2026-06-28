@@ -35,13 +35,25 @@ import {
 
 const SITE_ID = "default"
 
-// Don't send thermostat commands more often than this — protects Nest's rate
-// limit and avoids hunting. The engine is invoked ~every 60s by the client.
-const ACTUATION_COOLDOWN_MS = 10 * 60 * 1000
+// --- TWO DISTINCT THROTTLE TIMERS ------------------------------------------
+// 1) EVALUATION CADENCE — how often the engine *thinks*. This is set by the
+//    Supabase pg_cron schedule (every 5 minutes). Recorded here for clarity;
+//    the cron is the source of truth.
+const EVALUATION_CADENCE_MS = 5 * 60 * 1000
+// 2) ACTUATION COOLDOWN — how often the engine is *allowed to send a command*
+//    to the thermostat. Deliberately longer than the evaluation cadence so the
+//    setpoint can't oscillate (up/down/up) as conditions cross a threshold.
+//    Sits on top of the Nest client's 429 exponential backoff.
+const ACTUATION_COOLDOWN_MS = 12 * 60 * 1000
+
 // Comfort must be at least this far below target before we actuate.
 const COMFORT_TRIGGER_GAP = 8
 // Don't repeat the same recommendation more than once per hour.
 const RECO_COOLDOWN_MS = 60 * 60 * 1000
+// Heartbeat: when a tick takes no action, log an "evaluation" row at most this
+// often, so the journal proves the engine is running without flooding it
+// (a row every 5-min tick would be 288/day; this caps it to ~48/day).
+const HEARTBEAT_MS = 30 * 60 * 1000
 // Single comfort nudge step (°F).
 const COMFORT_STEP_F = 2
 // Confirmation tolerance — SDM rounds to ~0.5°C, so allow ~1°F slack.
@@ -152,6 +164,28 @@ async function maybeRecommend(db: Db, key: string, reason: string, before: Befor
   await insertJournal(db, {
     action_type: "recommendation",
     trigger_reason: `[${key}] ${reason}`,
+    command_sent: null,
+    nest_confirmed: null,
+    before_state: before,
+  })
+  return true
+}
+
+// Heartbeat — log a throttled "evaluation, no change needed" row so the
+// journal proves the cron engine is alive, without flooding every 5 min.
+async function maybeHeartbeat(db: Db, detail: string, before: BeforeState): Promise<boolean> {
+  const since = new Date(Date.now() - HEARTBEAT_MS).toISOString()
+  const { data } = await db
+    .from("automation_journal")
+    .select("id")
+    .eq("site_id", SITE_ID)
+    .eq("action_type", "evaluation")
+    .gte("occurred_at", since)
+    .limit(1)
+  if (data?.length) return false
+  await insertJournal(db, {
+    action_type: "evaluation",
+    trigger_reason: `Evaluated — ${detail}`,
     command_sent: null,
     nest_confirmed: null,
     before_state: before,
@@ -416,5 +450,7 @@ export async function runAutomationTick(): Promise<TickResult> {
     }
   }
 
+  const detail = inCooldown ? "in actuation cooldown" : "comfort on track, no change needed"
+  await maybeHeartbeat(db, detail, before)
   return { ran: false, action: null, detail: inCooldown ? "cooldown" : "no action needed" }
 }
