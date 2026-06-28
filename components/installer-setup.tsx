@@ -3,6 +3,7 @@
 import { useState } from "react"
 import useSWR from "swr"
 import Link from "next/link"
+import { FilterCalibrationWorkflow } from "./filter-health-card"
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
 
@@ -477,6 +478,15 @@ export function InstallerSetup() {
               />
             </>
           ) : null}
+        </Section>
+
+        <Section
+          title="Filter Health Baseline"
+          blurb="Capture this system's static-pressure baseline so the homeowner's Filter Health gauge can track filter load. Remove the filter for the first reading, install a fresh one for the second. Every future filter change re-runs this, which also builds a long-term evaporator-coil fouling baseline."
+        >
+          <div className="sm:col-span-2">
+            <FilterCalibrationWorkflow />
+          </div>
         </Section>
 
         <Section title="Utility Rate" blurb="Confirms which Evergy rate plan this home is on for cost calculations.">

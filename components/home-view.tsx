@@ -2,10 +2,11 @@
 
 import { useEffect, useState } from "react"
 import useSWR from "swr"
-import { DollarSign, Thermometer, Wind, Sun, Home as HomeIcon, Smile } from "lucide-react"
+import { DollarSign, Thermometer, Sun, Home as HomeIcon, Smile } from "lucide-react"
 import { ComfortProfilePanel, HappyNumberPanel } from "./comfort-profile"
 import { NestCard } from "./nest-card"
 import { AutomationJournalCard } from "./automation-journal"
+import { FilterHealthCard } from "./filter-health-card"
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
 
@@ -75,18 +76,6 @@ function humidityComfort(rh: number | null): { label: string; tone: string } {
   return { label: "Very humid — tropical air", tone: "text-orange" }
 }
 
-// Static pressure → filter / airflow health. Thresholds mirror the engine's
-// ECM rated-static limit (~0.8" WC) so this stays consistent with the model.
-function airflowHealth(staticInWc: number | null): { label: string; tone: string; dot: string } {
-  if (staticInWc == null)
-    return { label: "Airflow reading unavailable", tone: "text-muted-foreground", dot: "bg-muted" }
-  if (staticInWc <= 0.8)
-    return { label: "Airflow is good", tone: "text-ok", dot: "bg-ok glow-ok" }
-  if (staticInWc <= 1.0)
-    return { label: "Airflow slightly restricted — check your filter", tone: "text-warn", dot: "bg-warn glow-warn" }
-  return { label: "Airflow restricted — filter change needed", tone: "text-orange", dot: "bg-orange glow-orange" }
-}
-
 // Outdoor reassurance copy pulled from the live outdoor temp.
 function outdoorMessage(t: number | null): string {
   if (t == null) return "Outdoor conditions are unavailable right now."
@@ -133,7 +122,6 @@ export function HomeView() {
   const status = systemStatus(c)
   const eff = efficiencyLabel(c?.efficiency_color ?? "learning")
   const humidity = humidityComfort(c?.return_rh ?? null)
-  const airflow = airflowHealth(c?.static_pressure_inwc ?? null)
   const ratedSeer2 = c?.diagnostics?.ratedSeer2 ?? null
 
   return (
@@ -239,21 +227,8 @@ export function HomeView() {
         </div>
       </div>
 
-      {/* 5. Static pressure → filter health */}
-      <div className="rounded-2xl border border-border bg-card p-5 shadow-lg shadow-black/40">
-        <SectionHeader icon={<Wind className="h-5 w-5 text-accent" />} title="Filter & airflow" />
-        <div className="flex items-center gap-3 rounded-xl border border-border bg-elevated p-4">
-          <span className={`h-4 w-4 shrink-0 rounded-full ${airflow.dot}`} aria-hidden />
-          <div>
-            <p className={`text-base font-semibold text-pretty ${airflow.tone}`}>{airflow.label}</p>
-            <p className="mt-0.5 text-xs text-muted">
-              {c?.static_pressure_inwc != null
-                ? `Static pressure: ${c.static_pressure_inwc.toFixed(2)}" WC`
-                : "Awaiting reading"}
-            </p>
-          </div>
-        </div>
-      </div>
+      {/* 5. Filter health — needle gauge driven by filter LOAD ratio */}
+      <FilterHealthCard staticInWc={c?.static_pressure_inwc ?? null} />
 
           {/* 6. Outdoor conditions */}
           <div className="rounded-2xl border border-border bg-card p-5 shadow-lg shadow-black/40">

@@ -12,6 +12,7 @@ import {
   ChevronDown,
   CheckCircle2,
   Clock,
+  Filter,
 } from "lucide-react"
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
@@ -172,6 +173,8 @@ function actionMeta(type: string): {
       return { label: "Recommendation", icon: Lightbulb, badge: "bg-warn/15 text-warn" }
     case "evaluation":
       return { label: "Checked in", icon: Clock, badge: "bg-elevated text-muted-foreground" }
+    case "filter_change":
+      return { label: "Filter change", icon: Filter, badge: "bg-accent/15 text-accent" }
     default:
       return { label: "Automation", icon: ShieldCheck, badge: "bg-elevated text-muted-foreground" }
   }
