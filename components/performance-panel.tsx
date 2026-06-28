@@ -45,7 +45,7 @@ const VERDICT: Record<
   red: { accent: "bad", dot: "bg-bad glow-bad", title: "Needs attention", sub: "Well below the healthy baseline for these conditions." },
   learning: { accent: "primary", dot: "bg-primary glow-primary", title: "Learning your system", sub: "Building a healthy baseline. Color verdicts begin once there's enough history." },
   idle: { accent: "primary", dot: "bg-muted", title: "System is off", sub: "No condenser power, blower power, or temperature drop detected — nothing to score right now." },
-  unknown: { accent: "primary", dot: "bg-primary glow-primary", title: "Running — measuring", sub: "The system is actively cooling, but efficiency can't be scored yet (a supply-air reading is needed)." },
+  unknown: { accent: "primary", dot: "bg-primary glow-primary", title: "Running — measuring", sub: "The system is actively cooling, but efficiency can't be scored yet." },
 }
 
 const PERIOD_LABEL: Record<string, string> = {
@@ -92,7 +92,9 @@ export function PerformancePanel() {
       ? { accent: "bad" as const, dot: "bg-bad glow-bad", title: "Sensor issue detected", sub: "The system appears to be cooling, but the sensors disagree. See the details below." }
       : c?.system_state === "fan_only"
         ? { accent: "primary" as const, dot: "bg-primary glow-primary", title: "Fan running", sub: "The blower is circulating air, but the compressor is off — no active cooling to score right now." }
-        : VERDICT[c?.efficiency_color ?? "learning"] ?? VERDICT.learning
+        : c?.efficiency_color === "unknown" && c?.diagnostics?.airflowNote
+          ? { ...VERDICT.unknown, sub: `The system is actively cooling, but efficiency can't be scored yet — ${c.diagnostics.airflowNote}.` }
+          : VERDICT[c?.efficiency_color ?? "learning"] ?? VERDICT.learning
 
   const tons = c?.capacity_btuh != null ? c.capacity_btuh / 12000 : null
   const eer = c?.live_eer ?? null
