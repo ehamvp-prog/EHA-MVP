@@ -3,9 +3,13 @@
 import { useState } from "react"
 import useSWR from "swr"
 import Link from "next/link"
+import { Lock, Unlock } from "lucide-react"
 import { FilterCalibrationWorkflow } from "./filter-health-card"
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
+
+// Soft unlock code for installer setup. View stays protected until entered.
+const UNLOCK_CODE = "7036"
 
 type Profile = Record<string, string | number | boolean | null>
 
@@ -19,6 +23,7 @@ function Field({
   type = "text",
   placeholder,
   unit,
+  disabled,
 }: {
   label: string
   hint?: string
@@ -28,6 +33,7 @@ function Field({
   type?: string
   placeholder?: string
   unit?: string
+  disabled?: boolean
 }) {
   return (
     <label className="flex flex-col gap-1.5">
@@ -40,8 +46,9 @@ function Field({
           value={value}
           inputMode={type === "number" ? "decimal" : undefined}
           placeholder={placeholder}
+          disabled={disabled}
           onChange={(e) => onChange(name, e.target.value)}
-          className="w-full rounded-xl border border-border bg-input px-3 py-2.5 text-sm text-foreground outline-none transition focus:border-primary focus:ring-1 focus:ring-primary"
+          className="w-full rounded-xl border border-border bg-input px-3 py-2.5 text-sm text-foreground outline-none transition focus:border-primary focus:ring-1 focus:ring-primary disabled:opacity-60 disabled:cursor-not-allowed"
         />
         {unit ? <span className="shrink-0 text-xs text-muted">{unit}</span> : null}
       </div>
@@ -57,6 +64,7 @@ function Select({
   value,
   onChange,
   options,
+  disabled,
 }: {
   label: string
   hint?: string
@@ -64,6 +72,7 @@ function Select({
   value: string
   onChange: (name: string, value: string) => void
   options: { value: string; label: string }[]
+  disabled?: boolean
 }) {
   return (
     <label className="flex flex-col gap-1.5">
@@ -72,8 +81,9 @@ function Select({
       <select
         name={name}
         value={value}
+        disabled={disabled}
         onChange={(e) => onChange(name, e.target.value)}
-        className="w-full rounded-xl border border-border bg-input px-3 py-2.5 text-sm text-foreground outline-none transition focus:border-primary focus:ring-1 focus:ring-primary"
+        className="w-full rounded-xl border border-border bg-input px-3 py-2.5 text-sm text-foreground outline-none transition focus:border-primary focus:ring-1 focus:ring-primary disabled:opacity-60 disabled:cursor-not-allowed"
       >
         <option value="">Choose one…</option>
         {options.map((o) => (
@@ -179,6 +189,21 @@ export function InstallerSetup() {
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState<{ kind: "ok" | "bad"; text: string } | null>(null)
 
+  // Soft lock: setup is protected until the code is entered.
+  const [unlocked, setUnlocked] = useState(false)
+  const [codeEntry, setCodeEntry] = useState("")
+  const [codeError, setCodeError] = useState(false)
+
+  function tryUnlock() {
+    if (codeEntry === UNLOCK_CODE) {
+      setUnlocked(true)
+      setCodeError(false)
+      setCodeEntry("")
+    } else {
+      setCodeError(true)
+    }
+  }
+
   function hydrate(p: Profile) {
     const next: Record<string, string> = {}
     for (const k of FIELD_KEYS) {
@@ -229,6 +254,8 @@ export function InstallerSetup() {
 
   const v = (k: string) => form[k] ?? ""
 
+  const locked = !unlocked
+
   return (
     <main className="mx-auto min-h-screen w-full max-w-3xl px-4 py-6">
       <header className="mb-6">
@@ -242,6 +269,56 @@ export function InstallerSetup() {
           efficiency math matches your real system instead of generic guesses. You can change it anytime.
         </p>
       </header>
+
+      {locked ? (
+        <section className="mb-5 rounded-2xl border border-border bg-card p-5 shadow-panel">
+          <div className="mb-2 flex items-center gap-2">
+            <Lock className="h-5 w-5 text-muted" />
+            <h2 className="text-base font-semibold text-foreground">Setup is read-only</h2>
+          </div>
+          <p className="mb-4 text-sm leading-relaxed text-muted">
+            You can view every value that feeds the live efficiency math below. To make changes, enter the
+            installer code. The system is actively logging accurate data, so editing is protected.
+          </p>
+          <div className="flex items-center gap-2">
+            <input
+              type="password"
+              inputMode="numeric"
+              value={codeEntry}
+              onChange={(e) => {
+                setCodeEntry(e.target.value)
+                setCodeError(false)
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") tryUnlock()
+              }}
+              placeholder="Enter code to edit"
+              className="w-44 rounded-xl border border-border bg-input px-3 py-2.5 text-sm text-foreground outline-none transition focus:border-primary focus:ring-1 focus:ring-primary"
+            />
+            <button
+              type="button"
+              onClick={tryUnlock}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition hover:brightness-110"
+            >
+              <Unlock className="h-4 w-4" />
+              Unlock to edit
+            </button>
+          </div>
+          {codeError ? <p className="mt-3 text-sm text-bad">Incorrect code.</p> : null}
+        </section>
+      ) : (
+        <section className="mb-5 flex items-center gap-2 rounded-2xl border border-accent/40 bg-card px-5 py-3 shadow-panel">
+          <Unlock className="h-4 w-4 text-accent" />
+          <span className="text-sm font-medium text-accent">Editing unlocked</span>
+          <button
+            type="button"
+            onClick={() => setUnlocked(false)}
+            className="ml-auto text-xs font-medium text-muted hover:text-foreground"
+          >
+            Lock
+          </button>
+        </section>
+      )}
 
       <form onSubmit={save} className="flex flex-col gap-5">
         <Section
@@ -257,6 +334,7 @@ export function InstallerSetup() {
             placeholder="e.g. 3"
             value={v("system_tonnage")}
             onChange={set}
+            disabled={locked}
           />
           <Field
             label="Condenser make"
@@ -265,6 +343,7 @@ export function InstallerSetup() {
             placeholder="e.g. Trane"
             value={v("condenser_make")}
             onChange={set}
+            disabled={locked}
           />
           <Field
             label="Condenser model"
@@ -273,6 +352,7 @@ export function InstallerSetup() {
             placeholder="e.g. 4TTR6036"
             value={v("condenser_model")}
             onChange={set}
+            disabled={locked}
           />
           <Field
             label="Condenser serial number"
@@ -281,6 +361,7 @@ export function InstallerSetup() {
             placeholder="e.g. 1234A5678"
             value={v("condenser_serial")}
             onChange={set}
+            disabled={locked}
           />
           <Field
             label="Evaporator coil model"
@@ -289,6 +370,7 @@ export function InstallerSetup() {
             placeholder="e.g. 4PXCBU037BC3"
             value={v("evaporator_coil_model")}
             onChange={set}
+            disabled={locked}
           />
           <Select
             label="Metering type"
@@ -296,6 +378,7 @@ export function InstallerSetup() {
             name="metering_type"
             value={v("metering_type")}
             onChange={set}
+            disabled={locked}
             options={[
               { value: "piston_fixed_orifice", label: "Piston / fixed orifice" },
               { value: "txv", label: "TXV (thermostatic expansion valve)" },
@@ -313,6 +396,7 @@ export function InstallerSetup() {
             name="blower_type"
             value={v("blower_type")}
             onChange={set}
+            disabled={locked}
             options={[
               { value: "furnace", label: "Furnace" },
               { value: "air_handler", label: "Air handler" },
@@ -325,6 +409,7 @@ export function InstallerSetup() {
             placeholder="e.g. S9V2B080U3"
             value={v("blower_model")}
             onChange={set}
+            disabled={locked}
           />
           <Field
             label="Speed tap"
@@ -333,6 +418,7 @@ export function InstallerSetup() {
             placeholder="e.g. high, tap 4"
             value={v("blower_speed_tap")}
             onChange={set}
+            disabled={locked}
           />
           <Field
             label="ECM profile"
@@ -341,6 +427,7 @@ export function InstallerSetup() {
             placeholder="e.g. 350 CFM/ton"
             value={v("ecm_profile")}
             onChange={set}
+            disabled={locked}
           />
           <Field
             label="Airflow per ton (CFM/ton)"
@@ -351,6 +438,7 @@ export function InstallerSetup() {
             placeholder="e.g. 400"
             value={v("cfm_per_ton")}
             onChange={set}
+            disabled={locked}
           />
         </Section>
 
@@ -365,6 +453,7 @@ export function InstallerSetup() {
             placeholder="e.g. 67202"
             value={v("weather_zip")}
             onChange={set}
+            disabled={locked}
           />
         </Section>
 
@@ -381,6 +470,7 @@ export function InstallerSetup() {
             placeholder="e.g. 15.2"
             value={v("rated_seer2")}
             onChange={set}
+            disabled={locked}
           />
           <Select
             label="Equipment class"
@@ -388,6 +478,7 @@ export function InstallerSetup() {
             name="equipment_class"
             value={v("equipment_class")}
             onChange={set}
+            disabled={locked}
             options={[
               { value: "standard_split", label: "Standard split system" },
               { value: "two_stage_split", label: "Two-stage split system" },
@@ -404,6 +495,7 @@ export function InstallerSetup() {
             placeholder="e.g. 0.95"
             value={v("seer2_conversion_factor")}
             onChange={set}
+            disabled={locked}
           />
         </Section>
 
@@ -415,7 +507,7 @@ export function InstallerSetup() {
             label="Automatic Comfort Adjustment"
             hint="When the home drifts out of comfort, Elevate nudges the thermostat back toward the learned target — never outside the safety band below."
             checked={Boolean(toggles.auto_comfort_enabled)}
-            onChange={(v) => toggle("auto_comfort_enabled", v)}
+            onChange={(v) => { if (!locked) toggle("auto_comfort_enabled", v) }}
           />
           {toggles.auto_comfort_enabled ? (
             <>
@@ -443,7 +535,7 @@ export function InstallerSetup() {
                 label="Allow fan circulation"
                 hint="Let Elevate run the thermostat fan for short bursts to improve comfort through circulation (energy-efficient)."
                 checked={Boolean(toggles.auto_comfort_fan_enabled)}
-                onChange={(v) => toggle("auto_comfort_fan_enabled", v)}
+                onChange={(v) => { if (!locked) toggle("auto_comfort_fan_enabled", v) }}
               />
             </>
           ) : null}
@@ -452,7 +544,7 @@ export function InstallerSetup() {
             label="Peak Dodger"
             hint="Pre-cools before Evergy peak hours (4–8 PM) so the system coasts through the expensive window. Skips weekends and holidays automatically."
             checked={Boolean(toggles.peak_dodger_enabled)}
-            onChange={(v) => toggle("peak_dodger_enabled", v)}
+            onChange={(v) => { if (!locked) toggle("peak_dodger_enabled", v) }}
           />
           {toggles.peak_dodger_enabled ? (
             <>
@@ -484,7 +576,7 @@ export function InstallerSetup() {
           title="Filter Health Baseline"
           blurb="Capture this system's static-pressure baseline so the homeowner's Filter Health gauge can track filter load. Remove the filter for the first reading, install a fresh one for the second. Every future filter change re-runs this, which also builds a long-term evaporator-coil fouling baseline."
         >
-          <div className="sm:col-span-2">
+          <div className={`sm:col-span-2 ${locked ? "pointer-events-none opacity-60" : ""}`}>
             <FilterCalibrationWorkflow />
           </div>
         </Section>
@@ -494,6 +586,7 @@ export function InstallerSetup() {
             <input
               type="checkbox"
               checked={rtou}
+              disabled={locked}
               onChange={(e) => {
                 setTouched(true)
                 setRtou(e.target.checked)
@@ -523,7 +616,7 @@ export function InstallerSetup() {
         <div className="sticky bottom-4 flex items-center justify-end gap-3">
           <button
             type="submit"
-            disabled={saving}
+            disabled={saving || locked}
             className="rounded-xl bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground shadow-glow transition hover:brightness-110 disabled:opacity-60"
           >
             {saving ? "Saving…" : "Save system profile"}
