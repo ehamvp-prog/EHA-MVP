@@ -101,6 +101,10 @@ export function HomeView() {
     week_to_date: number
     today: number
   }>("/api/cost/history", fetcher, { refreshInterval: 60000 })
+  const { data: comfortHistory } = useSWR<{
+    days: { day: string; tempF: number; comfort: number; happy: number }[]
+    hours: { hour: number; tempF: number; comfort: number; happy: number }[]
+  }>("/api/comfort/history", fetcher, { refreshInterval: 60000 })
 
   // Persist on a cadence too, so Home View alone keeps history growing.
   useEffect(() => {
@@ -116,6 +120,7 @@ export function HomeView() {
   // numbers through the normal SWR fetches below.
 
   const [historyOpen, setHistoryOpen] = useState(false)
+  const [comfortHistoryOpen, setComfortHistoryOpen] = useState(false)
   const [subTab, setSubTab] = useState<"home" | "comfort">("home")
   const c = data?.computed
 
@@ -225,6 +230,22 @@ export function HomeView() {
           <p className="text-xs uppercase tracking-wider text-muted">Indoor humidity</p>
           <p className={`mt-1 text-base font-semibold text-pretty ${humidity.tone}`}>{humidity.label}</p>
         </div>
+
+        {/* Collapsible comfort history: indoor temp, comfort score, happy number */}
+        <button
+          type="button"
+          onClick={() => setComfortHistoryOpen((v) => !v)}
+          aria-expanded={comfortHistoryOpen}
+          className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-border bg-elevated px-4 py-2.5 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+        >
+          {comfortHistoryOpen ? "Hide" : "Show"} comfort history
+          <span aria-hidden className={`transition-transform ${comfortHistoryOpen ? "rotate-180" : ""}`}>
+            ⌄
+          </span>
+        </button>
+        {comfortHistoryOpen ? (
+          <ComfortChart days={comfortHistory?.days ?? []} hours={comfortHistory?.hours ?? []} />
+        ) : null}
       </div>
 
       {/* 5. Filter health — needle gauge driven by filter LOAD ratio */}
@@ -589,6 +610,283 @@ function TouLegend() {
       <span className="flex items-center gap-1.5">
         <span className="h-2.5 w-2.5 rounded-sm" style={{ background: "rgba(245, 128, 61, 0.4)" }} aria-hidden />
         On-peak
+      </span>
+    </div>
+  )
+}
+
+// ---- Comfort-over-time chart ----------------------------------------------
+// Three line series on the SAME time axis as the cost chart: indoor temp (°F,
+// left axis) plus comfort score and happy number (0–100, right axis). Each
+// series gets a unique color. Daily = today's hours, Weekly = last 7 days,
+// Monthly = current calendar month.
+
+type ComfortPoint = { label: string; show: boolean; tempF: number | null; comfort: number | null; happy: number | null }
+
+// Distinct, on-palette colors for the three series.
+const COMFORT_COLORS = {
+  temp: "var(--color-primary)", // teal — indoor temperature
+  comfort: "var(--color-accent)", // blue — comfort score
+  happy: "var(--color-warn)", // amber — happy number
+} as const
+
+function ComfortChart({
+  days,
+  hours,
+}: {
+  days: { day: string; tempF: number; comfort: number; happy: number }[]
+  hours: { hour: number; tempF: number; comfort: number; happy: number }[]
+}) {
+  const [mode, setMode] = useState<ChartMode>("daily")
+
+  const title =
+    mode === "daily"
+      ? "Today's comfort by hour"
+      : mode === "weekly"
+        ? "This week's comfort"
+        : "This month's comfort"
+
+  let points: ComfortPoint[] = []
+  let fallback: string | null = null
+
+  if (mode === "daily") {
+    const byHour = new Map(hours.map((h) => [h.hour, h]))
+    points = Array.from({ length: 24 }, (_, h) => {
+      const rec = byHour.get(h)
+      return {
+        label: hourLabel(h),
+        show: h % 6 === 0 || h === 23,
+        tempF: rec?.tempF ?? null,
+        comfort: rec?.comfort ?? null,
+        happy: rec?.happy ?? null,
+      }
+    })
+    if (!points.some((p) => p.tempF != null)) {
+      fallback = "No readings recorded yet today. Your comfort history will appear here as the system runs."
+    }
+  } else if (mode === "weekly") {
+    const recent = days.slice(-7)
+    if (recent.length < 2) {
+      fallback = "Still collecting — check back in a day or two."
+    } else {
+      points = recent.map((d) => ({
+        label: dayShortLabel(d.day),
+        show: true,
+        tempF: d.tempF,
+        comfort: d.comfort,
+        happy: d.happy,
+      }))
+    }
+  } else {
+    const nowCst = new Date(Date.now() - 6 * 60 * 60 * 1000)
+    const ym = `${nowCst.getUTCFullYear()}-${String(nowCst.getUTCMonth() + 1).padStart(2, "0")}`
+    const monthDays = days.filter((d) => d.day.startsWith(ym))
+    if (monthDays.length < 2) {
+      fallback = "Still collecting — check back in a day or two."
+    } else {
+      points = monthDays.map((d) => ({
+        label: String(Number(d.day.slice(8, 10))),
+        show: true,
+        tempF: d.tempF,
+        comfort: d.comfort,
+        happy: d.happy,
+      }))
+    }
+  }
+
+  return (
+    <div className="mt-3 rounded-xl border border-primary/40 bg-elevated p-4">
+      {/* Granularity toggle */}
+      <div
+        className="mb-3 flex items-center gap-1 rounded-lg border border-border bg-card p-0.5"
+        role="tablist"
+        aria-label="Comfort range"
+      >
+        {(["daily", "weekly", "monthly"] as ChartMode[]).map((m) => (
+          <button
+            key={m}
+            type="button"
+            role="tab"
+            aria-selected={mode === m}
+            onClick={() => setMode(m)}
+            className={`flex-1 rounded-md px-2 py-1 text-xs font-medium capitalize transition-colors ${
+              mode === m ? "bg-primary text-primary-foreground" : "text-muted hover:text-foreground"
+            }`}
+          >
+            {m}
+          </button>
+        ))}
+      </div>
+
+      <h4 className="mb-2 text-center text-sm font-semibold text-foreground">{title}</h4>
+
+      {fallback ? (
+        <p className="rounded-lg border border-border bg-card px-4 py-8 text-center text-sm text-muted">
+          {fallback}
+        </p>
+      ) : (
+        <>
+          <ComfortLineSvg points={points} />
+          <ComfortLegend />
+        </>
+      )}
+    </div>
+  )
+}
+
+// Pure SVG multi-line chart with dual y-axes: °F on the left (temp), 0–100 on
+// the right (comfort score + happy number).
+function ComfortLineSvg({ points }: { points: ComfortPoint[] }) {
+  const W = 340
+  const H = 200
+  const ml = 30
+  const mr = 30
+  const mt = 12
+  const mb = 22
+  const plotX0 = ml
+  const plotX1 = W - mr
+  const plotW = plotX1 - plotX0
+  const plotY0 = mt
+  const plotY1 = H - mb
+  const plotH = plotY1 - plotY0
+
+  const n = points.length
+  const xOf = (i: number) => (n <= 1 ? plotX0 + plotW / 2 : plotX0 + (i / (n - 1)) * plotW)
+
+  // Left axis: temperature, padded to a clean range around the data.
+  const temps = points.map((p) => p.tempF).filter((v): v is number => v != null)
+  const tMinRaw = temps.length ? Math.min(...temps) : 65
+  const tMaxRaw = temps.length ? Math.max(...temps) : 80
+  const tMin = Math.floor((tMinRaw - 2) / 5) * 5
+  const tMax = Math.ceil((tMaxRaw + 2) / 5) * 5
+  const tSpan = Math.max(tMax - tMin, 1)
+  const yTemp = (v: number) => plotY1 - ((v - tMin) / tSpan) * plotH
+
+  // Right axis: scores fixed 0–100.
+  const yScore = (v: number) => plotY1 - (v / 100) * plotH
+
+  // Build an SVG polyline path from a series, skipping null gaps.
+  const pathFor = (key: "tempF" | "comfort" | "happy", y: (v: number) => number) => {
+    let d = ""
+    let pen = false
+    points.forEach((p, i) => {
+      const v = p[key]
+      if (v == null) {
+        pen = false
+        return
+      }
+      d += `${pen ? "L" : "M"}${xOf(i).toFixed(1)},${y(v).toFixed(1)} `
+      pen = true
+    })
+    return d.trim()
+  }
+
+  const tempPath = pathFor("tempF", yTemp)
+  const comfortPath = pathFor("comfort", yScore)
+  const happyPath = pathFor("happy", yScore)
+
+  const tempTicks = [tMin, Math.round((tMin + tMax) / 2), tMax]
+  const scoreTicks = [0, 50, 100]
+
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      className="w-full"
+      role="img"
+      aria-label="Comfort history line chart: indoor temperature, comfort score, and happy number"
+      style={{ height: "auto" }}
+    >
+      {/* Horizontal gridlines aligned to the score axis */}
+      {scoreTicks.map((t, i) => {
+        const y = yScore(t)
+        return (
+          <line
+            key={`grid-${i}`}
+            x1={plotX0}
+            y1={y}
+            x2={plotX1}
+            y2={y}
+            stroke="var(--color-border)"
+            strokeWidth={1}
+          />
+        )
+      })}
+
+      {/* Left axis labels (°F) */}
+      {tempTicks.map((t, i) => (
+        <text
+          key={`lt-${i}`}
+          x={plotX0 - 4}
+          y={yTemp(t) + 3}
+          textAnchor="end"
+          fontSize={8}
+          fill={COMFORT_COLORS.temp}
+        >
+          {`${t}°`}
+        </text>
+      ))}
+
+      {/* Right axis labels (score 0–100) */}
+      {scoreTicks.map((t, i) => (
+        <text
+          key={`rs-${i}`}
+          x={plotX1 + 4}
+          y={yScore(t) + 3}
+          textAnchor="start"
+          fontSize={8}
+          fill="var(--color-muted)"
+        >
+          {t}
+        </text>
+      ))}
+
+      {/* Series */}
+      {happyPath ? (
+        <path d={happyPath} fill="none" stroke={COMFORT_COLORS.happy} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+      ) : null}
+      {comfortPath ? (
+        <path d={comfortPath} fill="none" stroke={COMFORT_COLORS.comfort} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+      ) : null}
+      {tempPath ? (
+        <path d={tempPath} fill="none" stroke={COMFORT_COLORS.temp} strokeWidth={2} strokeDasharray="4 3" strokeLinejoin="round" strokeLinecap="round" />
+      ) : null}
+
+      {/* X axis line */}
+      <line x1={plotX0} y1={plotY1} x2={plotX1} y2={plotY1} stroke="var(--color-border)" strokeWidth={1} />
+
+      {/* X labels (subset) */}
+      {points.map((p, i) =>
+        p.show ? (
+          <text
+            key={`cx-${i}`}
+            x={xOf(i)}
+            y={plotY1 + 13}
+            textAnchor="middle"
+            fontSize={9}
+            fill="var(--color-muted)"
+          >
+            {p.label}
+          </text>
+        ) : null,
+      )}
+    </svg>
+  )
+}
+
+function ComfortLegend() {
+  return (
+    <div className="mt-2 flex flex-wrap items-center justify-center gap-4 text-[10px] text-muted">
+      <span className="flex items-center gap-1.5">
+        <span className="h-0.5 w-3.5 rounded-full" style={{ background: COMFORT_COLORS.temp }} aria-hidden />
+        Indoor temp (°F)
+      </span>
+      <span className="flex items-center gap-1.5">
+        <span className="h-0.5 w-3.5 rounded-full" style={{ background: COMFORT_COLORS.comfort }} aria-hidden />
+        Comfort score
+      </span>
+      <span className="flex items-center gap-1.5">
+        <span className="h-0.5 w-3.5 rounded-full" style={{ background: COMFORT_COLORS.happy }} aria-hidden />
+        Happy number
       </span>
     </div>
   )
