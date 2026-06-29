@@ -9,6 +9,7 @@ import { createAdminClient } from "@/lib/supabase/admin"
 import { runEngine, type SystemProfileInputs, type ComputedReading } from "@/lib/engine"
 import { extractHvacInputs, type LatestDevice, type HvacInputs } from "@/lib/engine/extract"
 import { getWeatherByLatLon, type WeatherResult } from "@/lib/weather"
+import { nestConfigured, getCachedHvacStatus } from "@/lib/nest/client"
 
 export const SITE_ID = "default"
 
@@ -77,12 +78,34 @@ export async function computeLiveReading(): Promise<ComputeBundle> {
     liveEer: h.live_eer as number | null,
   }))
 
+  // Previous reading's coil delta-T and static, used to detect a DECAYING
+  // (off-cycle) trend so residual coil cooling is not flagged as a fault.
+  const { data: prevRow } = await supabase
+    .from("computed_readings")
+    .select("return_temp_f, supply_temp_f, static_pressure_inwc")
+    .eq("site_id", SITE_ID)
+    .order("reading_at", { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  const prevReturn = (prevRow?.return_temp_f as number | null) ?? null
+  const prevSupply = (prevRow?.supply_temp_f as number | null) ?? null
+  const prevCoolingDeltaF =
+    prevReturn != null && prevSupply != null ? prevReturn - prevSupply : null
+  const prevStaticInWc = (prevRow?.static_pressure_inwc as number | null) ?? null
+
+  // Authoritative thermostat on/off mode, read from the fresh cache only
+  // (no SDM API call here — keeps Nest out of the compute hot path).
+  const hvacStatus = nestConfigured() ? await getCachedHvacStatus() : null
+
   const computed = runEngine(devices, (profile as SystemProfileInputs) ?? null, {
     liveBarometricInHg: weather?.outdoor_pressure_inhg ?? null,
     outdoorTempF: weather?.outdoor_temp_f ?? null,
     weatherConfidence: weather?.weather_confidence ?? null,
     baselineSamples,
     readingAt,
+    hvacStatus,
+    prevCoolingDeltaF,
+    prevStaticInWc,
   })
 
   return {

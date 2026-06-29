@@ -42,7 +42,9 @@ export function AutomationJournalCard() {
 
   if (entries.length === 0) return null
 
-  const visible = expanded ? entries : entries.slice(0, 4)
+  // Collapsed view shows only the single most recent event; expanding reveals
+  // the full history.
+  const visible = expanded ? entries : entries.slice(0, 1)
   const totalSavings = entries.reduce((sum, e) => sum + (e.est_savings_usd ?? 0), 0)
 
   return (
@@ -71,7 +73,7 @@ export function AutomationJournalCard() {
         ))}
       </ul>
 
-      {entries.length > 4 ? (
+      {entries.length > 1 ? (
         <button
           type="button"
           onClick={() => setExpanded((v) => !v)}

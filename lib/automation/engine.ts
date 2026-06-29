@@ -6,6 +6,7 @@ import {
   applyControl,
   getFreshAccessToken,
   nestConfigured,
+  cacheHvacStatus,
   NestAuthError,
   NestRateLimitError,
   type NestThermostat,
@@ -274,6 +275,9 @@ export async function runAutomationTick(): Promise<TickResult> {
   if (token) {
     try {
       thermostat = await fetchThermostat(token)
+      // Refresh the HVAC-status cache so the compute pipeline can gate
+      // run-state on the thermostat even while the app is closed.
+      if (thermostat?.hvacStatus) await cacheHvacStatus(thermostat.hvacStatus)
     } catch (err) {
       if (err instanceof NestRateLimitError) return { ran: false, action: null, detail: "rate_limited" }
       if (err instanceof NestAuthError) thermostat = null

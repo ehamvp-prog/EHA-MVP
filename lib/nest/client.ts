@@ -1,5 +1,6 @@
 import "server-only"
 import { createAdminClient } from "@/lib/supabase/admin"
+import type { HvacStatus } from "@/lib/engine/system-state"
 
 // ---------------------------------------------------------------------------
 // Google Nest SDM (Smart Device Management) integration — DISPLAY & CONTROL
@@ -83,6 +84,42 @@ export async function getTokenRow(): Promise<TokenRow | null> {
 export async function hasNestConnection(): Promise<boolean> {
   const row = await getTokenRow()
   return Boolean(row?.refresh_token)
+}
+
+// Persist the last-seen HVAC status so the compute pipeline can read the
+// thermostat's on/off mode without making its own SDM API call. Best-effort.
+export async function cacheHvacStatus(status: HvacStatus): Promise<void> {
+  if (!status) return
+  try {
+    const supabase = createAdminClient()
+    await supabase
+      .from("nest_tokens")
+      .update({ last_hvac_status: status, last_hvac_at: new Date().toISOString() })
+      .eq("site_id", SITE_ID)
+  } catch {
+    /* non-fatal: caching is an optimization, not a requirement */
+  }
+}
+
+// Read the cached HVAC status if it is fresh enough to trust. Returns null
+// when there is no thermostat, no cache, or the cache is stale — in which
+// case run-state falls back to pure sensor inference.
+export async function getCachedHvacStatus(maxAgeMs = 10 * 60 * 1000): Promise<HvacStatus> {
+  try {
+    const supabase = createAdminClient()
+    const { data } = await supabase
+      .from("nest_tokens")
+      .select("last_hvac_status, last_hvac_at")
+      .eq("site_id", SITE_ID)
+      .maybeSingle()
+    const status = (data as { last_hvac_status?: string | null } | null)?.last_hvac_status ?? null
+    const at = (data as { last_hvac_at?: string | null } | null)?.last_hvac_at ?? null
+    if (!status || !at) return null
+    if (Date.now() - new Date(at).getTime() > maxAgeMs) return null
+    return status as HvacStatus
+  } catch {
+    return null
+  }
 }
 
 // Exchange an authorization code for tokens and persist them.
