@@ -2,7 +2,7 @@
 
 import { useState } from "react"
 import useSWR from "swr"
-import { Thermometer, Snowflake, Flame, RefreshCw, Power, Fan, Minus, Plus, Wifi } from "lucide-react"
+import { Thermometer, Snowflake, Flame, RefreshCw, Power, Fan, Minus, Plus, Wifi, Lock, Unlock } from "lucide-react"
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
 
@@ -26,6 +26,9 @@ type NestData = {
 
 // Nest data is rate-limited and only changes occasionally — poll every 5 min.
 const POLL_MS = 5 * 60 * 1000
+
+// Soft unlock code for thermostat controls. Display/mirror stays read-only until entered.
+const UNLOCK_CODE = "7036"
 
 function SectionHeader({ icon, title }: { icon: React.ReactNode; title: string }) {
   return (
@@ -60,6 +63,21 @@ export function NestCard() {
   })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Soft lock: controls are read-only until the code is entered.
+  const [unlocked, setUnlocked] = useState(false)
+  const [codeEntry, setCodeEntry] = useState("")
+  const [codeError, setCodeError] = useState(false)
+
+  function tryUnlock() {
+    if (codeEntry === UNLOCK_CODE) {
+      setUnlocked(true)
+      setCodeError(false)
+      setCodeEntry("")
+    } else {
+      setCodeError(true)
+    }
+  }
 
   // Hide the card entirely until the env vars are configured.
   if (data && !data.configured) return null
@@ -108,6 +126,8 @@ export function NestCard() {
   const setpoint = activeSetpoint(t)
 
   async function control(body: Record<string, unknown>) {
+    // Soft gate: do nothing unless unlocked.
+    if (!unlocked) return
     setBusy(true)
     setError(null)
     try {
@@ -143,6 +163,8 @@ export function NestCard() {
   }
 
   const canAdjust = t.mode === "COOL" || t.mode === "HEAT"
+  // Controls are disabled whenever busy OR still locked.
+  const locked = !unlocked
   const modes: { key: Thermostat["mode"]; label: string; icon: React.ReactNode }[] = [
     { key: "COOL", label: "Cool", icon: <Snowflake className="h-4 w-4" /> },
     { key: "HEAT", label: "Heat", icon: <Flame className="h-4 w-4" /> },
@@ -184,13 +206,60 @@ export function NestCard() {
         ) : null}
       </div>
 
+      {/* Soft lock gate */}
+      {locked ? (
+        <div className="mb-4 rounded-xl border border-border bg-elevated px-4 py-3">
+          <div className="mb-2 flex items-center gap-2">
+            <Lock className="h-4 w-4 text-muted" />
+            <span className="text-sm font-medium text-muted">Controls locked — view only</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="password"
+              inputMode="numeric"
+              value={codeEntry}
+              onChange={(e) => {
+                setCodeEntry(e.target.value)
+                setCodeError(false)
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") tryUnlock()
+              }}
+              placeholder="Enter code"
+              className="w-32 rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground outline-none focus:border-primary"
+            />
+            <button
+              type="button"
+              onClick={tryUnlock}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90"
+            >
+              <Unlock className="h-4 w-4" />
+              Unlock
+            </button>
+          </div>
+          {codeError ? <p className="mt-2 text-sm text-bad">Incorrect code.</p> : null}
+        </div>
+      ) : (
+        <div className="mb-4 flex items-center gap-2 rounded-xl border border-accent/40 bg-elevated px-4 py-2.5">
+          <Unlock className="h-4 w-4 text-accent" />
+          <span className="text-sm font-medium text-accent">Controls unlocked</span>
+          <button
+            type="button"
+            onClick={() => setUnlocked(false)}
+            className="ml-auto text-xs font-medium text-muted hover:text-foreground"
+          >
+            Lock
+          </button>
+        </div>
+      )}
+
       {/* Setpoint adjust (single-mode only) */}
       {canAdjust ? (
         <div className="mb-4 flex items-center justify-center gap-6">
           <button
             type="button"
             onClick={() => adjustSetpoint(-1)}
-            disabled={busy}
+            disabled={busy || locked}
             aria-label="Lower setpoint"
             className="flex h-11 w-11 items-center justify-center rounded-full border border-border bg-elevated text-foreground transition-colors hover:bg-card disabled:opacity-50"
           >
@@ -202,7 +271,7 @@ export function NestCard() {
           <button
             type="button"
             onClick={() => adjustSetpoint(1)}
-            disabled={busy}
+            disabled={busy || locked}
             aria-label="Raise setpoint"
             className="flex h-11 w-11 items-center justify-center rounded-full border border-border bg-elevated text-foreground transition-colors hover:bg-card disabled:opacity-50"
           >
@@ -222,7 +291,7 @@ export function NestCard() {
                 key={m.key}
                 type="button"
                 onClick={() => control({ mode: m.key })}
-                disabled={busy || active}
+                disabled={busy || active || locked}
                 className={`flex flex-col items-center gap-1 rounded-xl border px-2 py-2.5 text-xs font-medium transition-colors ${
                   active
                     ? "border-primary bg-primary text-primary-foreground"
@@ -248,7 +317,7 @@ export function NestCard() {
                 key={fm}
                 type="button"
                 onClick={() => control({ fanMode: fm })}
-                disabled={busy || active}
+                disabled={busy || active || locked}
                 className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-sm font-medium transition-colors ${
                   active
                     ? "border-accent bg-accent text-accent-foreground"
