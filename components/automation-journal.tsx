@@ -80,7 +80,8 @@ export function AutomationJournalCard() {
     { refreshInterval: 60000 },
   )
   const [page, setPage] = useState(0)
-  const [collapsed, setCollapsed] = useState(false)
+  // Collapsed by default — expands only when the user opens it.
+  const [collapsed, setCollapsed] = useState(true)
   const entries = data?.entries ?? []
 
   if (entries.length === 0) return null
