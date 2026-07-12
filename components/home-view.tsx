@@ -362,6 +362,19 @@ function dayShortLabel(iso: string): string {
   return `${wd} ${d}`
 }
 
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+]
+
+type MonthlyResponse = {
+  year: number
+  month: number
+  weeks: { week: number; startDay: string; endDay: string; spend: number }[]
+  total: number
+  availableMonths: { year: number; month: number }[]
+}
+
 function CostChart({
   days,
   hours,
@@ -371,12 +384,28 @@ function CostChart({
 }) {
   const [mode, setMode] = useState<ChartMode>("daily")
 
+  // Selected month/year for the monthly view. Defaults to the current
+  // Central-time month; the picker only offers months that have data.
+  const nowCst = new Date(Date.now() - 6 * 60 * 60 * 1000)
+  const [selYear, setSelYear] = useState(nowCst.getUTCFullYear())
+  const [selMonth, setSelMonth] = useState(nowCst.getUTCMonth() + 1)
+
+  // Fetch weekly spend for the selected month only while the monthly tab is
+  // active (conditional SWR key avoids needless requests).
+  const { data: monthly } = useSWR<MonthlyResponse>(
+    mode === "monthly" ? `/api/cost/monthly?year=${selYear}&month=${selMonth}` : null,
+    fetcher,
+  )
+  const availableMonths = monthly?.availableMonths ?? [{ year: selYear, month: selMonth }]
+  const years = Array.from(new Set(availableMonths.map((a) => a.year))).sort((a, b) => b - a)
+  const monthsForYear = availableMonths.filter((a) => a.year === selYear).map((a) => a.month)
+
   const title =
     mode === "daily"
       ? "Today's spending by hour"
       : mode === "weekly"
         ? "This week's spending"
-        : "This month's spending"
+        : `${MONTH_NAMES[selMonth - 1]} ${selYear} — weekly spending`
 
   // Build the bar set + a fallback message for the active mode.
   let bars: Bar[] = []
@@ -417,18 +446,18 @@ function CostChart({
       }))
     }
   } else {
-    // Monthly: all days in the current calendar month (Central).
-    const nowCst = new Date(Date.now() - 6 * 60 * 60 * 1000)
-    const ym = `${nowCst.getUTCFullYear()}-${String(nowCst.getUTCMonth() + 1).padStart(2, "0")}`
-    const monthDays = days.filter((d) => d.day.startsWith(ym))
-    if (monthDays.length < 2) {
-      fallback = "Still collecting — check back in a day or two."
+    // Monthly: one bar per week of the selected calendar month.
+    const weeks = monthly?.weeks ?? []
+    if (!monthly) {
+      fallback = "Loading…"
+    } else if (weeks.length === 0) {
+      fallback = "No spending recorded for this month yet."
     } else {
-      bars = monthDays.map((d) => ({
-        key: d.day,
-        label: String(Number(d.day.slice(8, 10))),
+      bars = weeks.map((w) => ({
+        key: `w${w.week}`,
+        label: `Wk ${w.week}`,
         show: true,
-        value: d.spend,
+        value: w.spend,
       }))
     }
   }
@@ -457,7 +486,43 @@ function CostChart({
         ))}
       </div>
 
-      <h4 className="mb-2 text-center text-sm font-semibold text-foreground">{title}</h4>
+      {/* Month + year selector (monthly view only) */}
+      {mode === "monthly" ? (
+        <div className="mb-3 flex items-center gap-2">
+          <select
+            aria-label="Select month"
+            value={selMonth}
+            onChange={(e) => setSelMonth(Number(e.target.value))}
+            className="flex-1 rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground outline-none focus:border-accent"
+          >
+            {monthsForYear.map((m) => (
+              <option key={m} value={m}>
+                {MONTH_NAMES[m - 1]}
+              </option>
+            ))}
+          </select>
+          <select
+            aria-label="Select year"
+            value={selYear}
+            onChange={(e) => {
+              const y = Number(e.target.value)
+              setSelYear(y)
+              // Snap the month to a valid one for the new year.
+              const valid = availableMonths.filter((a) => a.year === y).map((a) => a.month)
+              if (valid.length && !valid.includes(selMonth)) setSelMonth(Math.max(...valid))
+            }}
+            className="w-24 rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground outline-none focus:border-accent"
+          >
+            {years.map((y) => (
+              <option key={y} value={y}>
+                {y}
+              </option>
+            ))}
+          </select>
+        </div>
+      ) : null}
+
+      <h4 className="mb-2 text-center text-sm font-semibold text-foreground text-pretty">{title}</h4>
 
       {fallback ? (
         <p className="rounded-lg border border-border bg-card px-4 py-8 text-center text-sm text-muted">
@@ -467,6 +532,14 @@ function CostChart({
         <>
           <BarChartSvg bars={bars} digits={yUnitDigits} showBands={mode === "daily"} />
           {mode === "daily" ? <TouLegend /> : null}
+          {mode === "monthly" && monthly ? (
+            <p className="mt-2 text-center text-xs text-muted">
+              Month total:{" "}
+              <span className="font-semibold text-foreground tabular-nums">
+                ${monthly.total.toFixed(2)}
+              </span>
+            </p>
+          ) : null}
         </>
       )}
     </div>
