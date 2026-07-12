@@ -11,6 +11,7 @@ import {
   TrendingDown,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   CheckCircle2,
   Clock,
   Filter,
@@ -79,6 +80,7 @@ export function AutomationJournalCard() {
     { refreshInterval: 60000 },
   )
   const [page, setPage] = useState(0)
+  const [collapsed, setCollapsed] = useState(false)
   const entries = data?.entries ?? []
 
   if (entries.length === 0) return null
@@ -89,25 +91,33 @@ export function AutomationJournalCard() {
   // marker, so the journal reads as a list of things that actually happened.
   const items = buildDisplayItems(entries)
 
-  // Paginate: 10 display items per page, newest first. "Older" pages back in
+  // Paginate: 5 display items per page, newest first. "Older" pages back in
   // time; there's no infinite scroll to blow up the screen.
-  const PAGE_SIZE = 10
+  const PAGE_SIZE = 5
   const pageCount = Math.max(1, Math.ceil(items.length / PAGE_SIZE))
   const safePage = Math.min(page, pageCount - 1)
   const visible = items.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE)
 
   return (
     <div className="rounded-2xl border border-border bg-card p-5 shadow-lg shadow-black/40">
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2.5">
-          <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-border bg-elevated">
+      <div className="flex items-center justify-between gap-3">
+        <button
+          type="button"
+          onClick={() => setCollapsed((v) => !v)}
+          aria-expanded={!collapsed}
+          className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
+        >
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-border bg-elevated">
             <History className="h-5 w-5 text-primary" />
           </span>
-          <div>
+          <div className="min-w-0">
             <h3 className="text-base font-semibold text-foreground">Automation Journal</h3>
-            <p className="text-xs text-muted">What Elevate did for you, and what it saved.</p>
+            <p className="truncate text-xs text-muted">What Elevate did for you, and what it saved.</p>
           </div>
-        </div>
+          <ChevronDown
+            className={`h-4 w-4 shrink-0 text-muted transition-transform ${collapsed ? "" : "rotate-180"}`}
+          />
+        </button>
         {totalSavings > 0 ? (
           <div className="shrink-0 rounded-xl border border-ok/30 bg-ok/10 px-3 py-1.5 text-right">
             <p className="text-[10px] uppercase tracking-wide text-muted">Saved</p>
@@ -116,18 +126,20 @@ export function AutomationJournalCard() {
         ) : null}
       </div>
 
-      <ul className="flex flex-col gap-2">
-        {visible.map((item) =>
-          item.kind === "steady" ? (
-            <SteadyRow key={item.id} item={item} />
-          ) : (
-            <JournalRow key={item.entry.id} entry={item.entry} />
-          ),
-        )}
-      </ul>
+      {collapsed ? null : (
+        <>
+          <ul className="mt-3 flex flex-col gap-2">
+            {visible.map((item) =>
+              item.kind === "steady" ? (
+                <SteadyRow key={item.id} item={item} />
+              ) : (
+                <JournalRow key={item.entry.id} entry={item.entry} />
+              ),
+            )}
+          </ul>
 
-      {pageCount > 1 ? (
-        <div className="mt-3 flex items-center justify-between gap-2">
+          {pageCount > 1 ? (
+            <div className="mt-3 flex items-center justify-between gap-2">
           <button
             type="button"
             onClick={() => setPage((p) => Math.max(0, p - 1))}
@@ -148,12 +160,14 @@ export function AutomationJournalCard() {
             Older <ChevronRight className="h-3.5 w-3.5" />
           </button>
         </div>
-      ) : null}
+          ) : null}
 
-      <p className="mt-3 flex items-center justify-center gap-1.5 text-center text-[11px] text-muted">
-        <ShieldCheck className="h-3 w-3 shrink-0" />
-        Automation runs automatically in the background — even when this app is closed.
-      </p>
+          <p className="mt-3 flex items-center justify-center gap-1.5 text-center text-[11px] text-muted">
+            <ShieldCheck className="h-3 w-3 shrink-0" />
+            Automation runs automatically in the background — even when this app is closed.
+          </p>
+        </>
+      )}
     </div>
   )
 }
