@@ -9,10 +9,12 @@ import {
   ShieldCheck,
   Lightbulb,
   TrendingDown,
-  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   CheckCircle2,
   Clock,
   Filter,
+  Minus,
 } from "lucide-react"
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
@@ -30,6 +32,45 @@ type JournalEntry = {
   est_comfort_delta: number | null
 }
 
+// A row in the rendered journal: either a real automated action, or a
+// collapsed "System steady" span that stands in for a run of quiet check-ins.
+type DisplayItem =
+  | { kind: "action"; entry: JournalEntry }
+  | { kind: "steady"; id: string; startAt: string; endAt: string; count: number }
+
+// Collapse consecutive "evaluation" (check-in) rows into a single steady
+// marker. Real actions pass through untouched. Input is newest-first, and
+// order is preserved.
+function buildDisplayItems(entries: JournalEntry[]): DisplayItem[] {
+  const items: DisplayItem[] = []
+  let run: JournalEntry[] = []
+
+  const flush = () => {
+    if (run.length === 0) return
+    const newest = run[0]
+    const oldest = run[run.length - 1]
+    items.push({
+      kind: "steady",
+      id: `steady-${oldest.id}-${newest.id}`,
+      startAt: oldest.occurred_at,
+      endAt: newest.occurred_at,
+      count: run.length,
+    })
+    run = []
+  }
+
+  for (const e of entries) {
+    if (e.action_type === "evaluation") {
+      run.push(e)
+    } else {
+      flush()
+      items.push({ kind: "action", entry: e })
+    }
+  }
+  flush()
+  return items
+}
+
 // Only render once the homeowner has automation history worth reviewing.
 export function AutomationJournalCard() {
   const { data } = useSWR<{ ok: boolean; entries: JournalEntry[] }>(
@@ -37,15 +78,23 @@ export function AutomationJournalCard() {
     fetcher,
     { refreshInterval: 60000 },
   )
-  const [expanded, setExpanded] = useState(false)
+  const [page, setPage] = useState(0)
   const entries = data?.entries ?? []
 
   if (entries.length === 0) return null
 
-  // Collapsed view shows only the single most recent event; expanding reveals
-  // the full history.
-  const visible = expanded ? entries : entries.slice(0, 1)
   const totalSavings = entries.reduce((sum, e) => sum + (e.est_savings_usd ?? 0), 0)
+
+  // Collapse noisy consecutive "check-in" rows into a single "System steady"
+  // marker, so the journal reads as a list of things that actually happened.
+  const items = buildDisplayItems(entries)
+
+  // Paginate: 10 display items per page, newest first. "Older" pages back in
+  // time; there's no infinite scroll to blow up the screen.
+  const PAGE_SIZE = 10
+  const pageCount = Math.max(1, Math.ceil(items.length / PAGE_SIZE))
+  const safePage = Math.min(page, pageCount - 1)
+  const visible = items.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE)
 
   return (
     <div className="rounded-2xl border border-border bg-card p-5 shadow-lg shadow-black/40">
@@ -68,21 +117,37 @@ export function AutomationJournalCard() {
       </div>
 
       <ul className="flex flex-col gap-2">
-        {visible.map((e) => (
-          <JournalRow key={e.id} entry={e} />
-        ))}
+        {visible.map((item) =>
+          item.kind === "steady" ? (
+            <SteadyRow key={item.id} item={item} />
+          ) : (
+            <JournalRow key={item.entry.id} entry={item.entry} />
+          ),
+        )}
       </ul>
 
-      {entries.length > 1 ? (
-        <button
-          type="button"
-          onClick={() => setExpanded((v) => !v)}
-          aria-expanded={expanded}
-          className="mt-3 flex w-full items-center justify-center gap-2 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
-        >
-          {expanded ? "Show less" : `Show all ${entries.length} actions`}
-          <ChevronDown className={`h-3.5 w-3.5 transition-transform ${expanded ? "rotate-180" : ""}`} />
-        </button>
+      {pageCount > 1 ? (
+        <div className="mt-3 flex items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => setPage((p) => Math.max(0, p - 1))}
+            disabled={safePage === 0}
+            className="flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <ChevronLeft className="h-3.5 w-3.5" /> Newer
+          </button>
+          <span className="text-[11px] tabular-nums text-muted">
+            Page {safePage + 1} of {pageCount}
+          </span>
+          <button
+            type="button"
+            onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+            disabled={safePage >= pageCount - 1}
+            className="flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Older <ChevronRight className="h-3.5 w-3.5" />
+          </button>
+        </div>
       ) : null}
 
       <p className="mt-3 flex items-center justify-center gap-1.5 text-center text-[11px] text-muted">
@@ -130,6 +195,46 @@ function JournalRow({ entry }: { entry: JournalEntry }) {
       </div>
     </li>
   )
+}
+
+// A collapsed run of quiet check-ins: the system was holding your comfort with
+// nothing to do. Shown as one muted, dashed row instead of dozens of "Checked
+// in" lines.
+function SteadyRow({ item }: { item: Extract<DisplayItem, { kind: "steady" }> }) {
+  const span = new Date(item.endAt).getTime() - new Date(item.startAt).getTime()
+  const spanLabel = duration(span)
+  const detail =
+    item.count > 1
+      ? `Held your comfort with no changes needed${spanLabel ? ` over ${spanLabel}` : ""}`
+      : "Held your comfort — no change needed"
+
+  return (
+    <li className="flex items-start gap-3 rounded-xl border border-dashed border-border bg-elevated/50 p-3">
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-elevated text-muted-foreground">
+        <Minus className="h-4 w-4" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-sm font-medium text-muted-foreground">System steady</span>
+          <span className="shrink-0 text-[11px] text-muted">{when(item.endAt)}</span>
+        </div>
+        <p className="mt-0.5 text-xs text-muted-foreground text-pretty">{detail}</p>
+      </div>
+    </li>
+  )
+}
+
+// Human-friendly duration for a steady span. Returns "" for sub-minute spans.
+function duration(ms: number): string {
+  const mins = Math.round(ms / 60000)
+  if (mins < 1) return ""
+  if (mins < 60) return `${mins}m`
+  const hrs = Math.floor(mins / 60)
+  const remMins = mins % 60
+  if (hrs < 24) return remMins ? `${hrs}h ${remMins}m` : `${hrs}h`
+  const days = Math.floor(hrs / 24)
+  const remHrs = hrs % 24
+  return remHrs ? `${days}d ${remHrs}h` : `${days}d`
 }
 
 // Honest confirmation: did Nest read back the expected state, or is it pending,
