@@ -18,6 +18,7 @@ import {
   Thermometer as ThermoIcon,
   AlertTriangle,
   History,
+  Undo2,
 } from "lucide-react"
 import {
   happyBand,
@@ -688,6 +689,7 @@ function CaptureTrainer({
 }) {
   const [saving, setSaving] = useState(false)
   const [done, setDone] = useState(false)
+  const [undoing, setUndoing] = useState(false)
   const [logOpen, setLogOpen] = useState(false)
   const ready = realityTempF != null && realityRh != null
 
@@ -711,6 +713,18 @@ function CaptureTrainer({
       setTimeout(() => setDone(false), 3000)
     } finally {
       setSaving(false)
+    }
+  }
+
+  // Undo the most recent capture — for an accidental "perfectly comfortable" tap.
+  async function undo() {
+    if (undoing || captures.length === 0) return
+    setUndoing(true)
+    try {
+      await fetch("/api/comfort/capture", { method: "DELETE" })
+      await Promise.all([mutate("/api/comfort/profile"), mutate("/api/comfort/capture")])
+    } finally {
+      setUndoing(false)
     }
   }
 
@@ -738,16 +752,30 @@ function CaptureTrainer({
 
       {captures.length > 0 ? (
         <>
-          <button
-            type="button"
-            onClick={() => setLogOpen((v) => !v)}
-            aria-expanded={logOpen}
-            className="mt-3 flex w-full items-center justify-center gap-2 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
-          >
-            <History className="h-3.5 w-3.5" />
-            {logOpen ? "Hide" : "Review"} {captures.length} capture{captures.length === 1 ? "" : "s"}
-            <ChevronDown className={`h-3.5 w-3.5 transition-transform ${logOpen ? "rotate-180" : ""}`} />
-          </button>
+          <div className="mt-3 flex items-center justify-center gap-2">
+            <button
+              type="button"
+              onClick={() => setLogOpen((v) => !v)}
+              aria-expanded={logOpen}
+              className="flex items-center justify-center gap-2 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <History className="h-3.5 w-3.5" />
+              {logOpen ? "Hide" : "Review"} {captures.length} capture{captures.length === 1 ? "" : "s"}
+              <ChevronDown className={`h-3.5 w-3.5 transition-transform ${logOpen ? "rotate-180" : ""}`} />
+            </button>
+            <span className="text-muted" aria-hidden="true">
+              ·
+            </span>
+            <button
+              type="button"
+              onClick={undo}
+              disabled={undoing}
+              className="flex items-center justify-center gap-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+            >
+              <Undo2 className="h-3.5 w-3.5" />
+              {undoing ? "Undoing…" : "Undo last"}
+            </button>
+          </div>
           {logOpen ? (
             <ul className="mt-2 flex max-h-44 flex-col gap-1.5 overflow-y-auto">
               {captures.map((cap) => (

@@ -13,7 +13,7 @@ import { capacityFromAirSide } from "./capacity"
 import { computeEfficiency } from "./seer2"
 import { extractHvacInputs, type LatestDevice } from "./extract"
 import { deriveCoilState, type CoilState } from "./coil-state"
-import { deriveSystemState, type SystemRunState, type SensorFault } from "./system-state"
+import { deriveSystemState, type SystemRunState, type SensorFault, type HvacStatus } from "./system-state"
 import { computeCost, type TouPeriod, type Season } from "./cost"
 import {
   assessAnomaly,
@@ -93,6 +93,7 @@ export interface ComputedReading {
     ratedSeer2: number | null
     coilStateNote: string
     systemStateNote: string
+    systemOffCycle: boolean
     systemBasis: string[]
     pressureSource: string
     anomalyNote: string
@@ -114,6 +115,12 @@ export interface EngineOptions {
   // Rolling history (already temp-paired) for the healthy baseline.
   baselineSamples?: BaselineSample[]
   readingAt?: string
+  // Authoritative on/off from a connected thermostat (Nest), when fresh.
+  // Used ONLY to gate run-state (cooling vs off) — never the SEER/cost math.
+  hvacStatus?: HvacStatus
+  // Previous reading's coil delta-T and static, for off-cycle decay detection.
+  prevCoolingDeltaF?: number | null
+  prevStaticInWc?: number | null
 }
 
 export function runEngine(
@@ -149,6 +156,9 @@ export function runEngine(
     returnTempF: inputs.returnTempF,
     supplyTempF: inputs.supplyTempF,
     staticInWc: inputs.staticInWc,
+    hvacStatus: options.hvacStatus ?? null,
+    prevCoolingDeltaF: options.prevCoolingDeltaF ?? null,
+    prevStaticInWc: options.prevStaticInWc ?? null,
   })
 
   const airflow = deriveAirflow({
@@ -237,6 +247,7 @@ export function runEngine(
       ratedSeer2: profile?.rated_seer2 ?? null,
       coilStateNote: coil.note,
       systemStateNote: systemState.note,
+      systemOffCycle: systemState.offCycle,
       systemBasis: systemState.basis,
       pressureSource,
       anomalyNote: anomaly.note,

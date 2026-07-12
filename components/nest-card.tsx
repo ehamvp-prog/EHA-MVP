@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect, useRef } from "react"
 import useSWR from "swr"
 import { Thermometer, Snowflake, Flame, RefreshCw, Power, Fan, Minus, Plus, Wifi, Lock, Unlock } from "lucide-react"
 
@@ -68,6 +68,34 @@ export function NestCard() {
   const [unlocked, setUnlocked] = useState(false)
   const [codeEntry, setCodeEntry] = useState("")
   const [codeError, setCodeError] = useState(false)
+
+  // Editable setpoint draft. `entry` is the value shown in the box; `dirty`
+  // means the user is mid-edit so we don't clobber it with polled data. A
+  // single debounced commit fires ONE Nest command for the final value — this
+  // is what prevents large temperature swings from timing out the rate-limited
+  // Nest API (previously each +/- press fired its own request).
+  const [entry, setEntry] = useState("")
+  const [dirty, setDirty] = useState(false)
+  const commitRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Keep the box in sync with the thermostat's active single-mode setpoint.
+  // While dirty, only clear the flag once the server reflects our committed value.
+  useEffect(() => {
+    const th = data?.thermostat
+    if (!th) return
+    const active = th.mode === "COOL" ? th.coolSetpointF : th.mode === "HEAT" ? th.heatSetpointF : null
+    if (active == null) return
+    if (dirty) {
+      if (String(active) === entry) setDirty(false)
+    } else {
+      setEntry(String(active))
+    }
+  }, [data, dirty, entry])
+
+  // Clear any pending commit timer on unmount.
+  useEffect(() => () => {
+    if (commitRef.current) clearTimeout(commitRef.current)
+  }, [])
 
   function tryUnlock() {
     if (codeEntry === UNLOCK_CODE) {
@@ -153,13 +181,44 @@ export function NestCard() {
     }
   }
 
-  // Adjust the setpoint for the active single-mode (HEAT or COOL).
-  function adjustSetpoint(delta: number) {
-    if (t!.mode === "COOL" && t!.coolSetpointF != null) {
-      control({ coolSetpoint: t!.coolSetpointF + delta })
-    } else if (t!.mode === "HEAT" && t!.heatSetpointF != null) {
-      control({ heatSetpoint: t!.heatSetpointF + delta })
+  function clampSetpoint(v: number) {
+    return Math.max(45, Math.min(95, Math.round(v)))
+  }
+
+  // Send ONE Nest command for the final value. Called after the user settles
+  // (debounce) or on blur/Enter — never once per degree.
+  function commitSetpoint(target: number) {
+    if (commitRef.current) {
+      clearTimeout(commitRef.current)
+      commitRef.current = null
     }
+    if (!Number.isFinite(target)) {
+      // Empty/invalid input — revert to the live server value.
+      setDirty(false)
+      return
+    }
+    const clamped = clampSetpoint(target)
+    setEntry(String(clamped))
+    if (t!.mode === "COOL") {
+      if (clamped !== t!.coolSetpointF) control({ coolSetpoint: clamped })
+    } else if (t!.mode === "HEAT") {
+      if (clamped !== t!.heatSetpointF) control({ heatSetpoint: clamped })
+    }
+    // `dirty` clears once the effect sees the server reflect `clamped`.
+  }
+
+  function scheduleCommit(target: number) {
+    if (commitRef.current) clearTimeout(commitRef.current)
+    commitRef.current = setTimeout(() => commitSetpoint(target), 900)
+  }
+
+  // Step the local draft instantly (no API call) and debounce a single commit.
+  function bumpSetpoint(delta: number) {
+    const base = entry !== "" ? Number.parseInt(entry, 10) : (setpoint.value ?? 72)
+    const next = clampSetpoint((Number.isFinite(base) ? base : 72) + delta)
+    setEntry(String(next))
+    setDirty(true)
+    scheduleCommit(next)
   }
 
   const canAdjust = t.mode === "COOL" || t.mode === "HEAT"
@@ -253,31 +312,55 @@ export function NestCard() {
         </div>
       )}
 
-      {/* Setpoint adjust (single-mode only) */}
+      {/* Setpoint adjust (single-mode only) — type a value or step with +/- */}
       {canAdjust ? (
-        <div className="mb-4 flex items-center justify-center gap-6">
-          <button
-            type="button"
-            onClick={() => adjustSetpoint(-1)}
-            disabled={busy || locked}
-            aria-label="Lower setpoint"
-            className="flex h-11 w-11 items-center justify-center rounded-full border border-border bg-elevated text-foreground transition-colors hover:bg-card disabled:opacity-50"
-          >
-            <Minus className="h-5 w-5" />
-          </button>
-          <span className="min-w-20 text-center text-4xl font-semibold text-foreground tabular-nums">
-            {setpoint.value != null ? `${setpoint.value}°` : "—"}
-          </span>
-          <button
-            type="button"
-            onClick={() => adjustSetpoint(1)}
-            disabled={busy || locked}
-            aria-label="Raise setpoint"
-            className="flex h-11 w-11 items-center justify-center rounded-full border border-border bg-elevated text-foreground transition-colors hover:bg-card disabled:opacity-50"
-          >
-            <Plus className="h-5 w-5" />
-          </button>
-        </div>
+        <>
+          <div className="mb-2 flex items-center justify-center gap-6">
+            <button
+              type="button"
+              onClick={() => bumpSetpoint(-1)}
+              disabled={busy || locked}
+              aria-label="Lower setpoint"
+              className="flex h-11 w-11 items-center justify-center rounded-full border border-border bg-elevated text-foreground transition-colors hover:bg-card disabled:opacity-50"
+            >
+              <Minus className="h-5 w-5" />
+            </button>
+            <div className="flex items-baseline gap-0.5">
+              <input
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                aria-label="Thermostat setpoint in degrees Fahrenheit"
+                disabled={busy || locked}
+                value={entry}
+                onFocus={(e) => e.currentTarget.select()}
+                onChange={(e) => {
+                  setEntry(e.target.value.replace(/[^0-9]/g, "").slice(0, 3))
+                  setDirty(true)
+                }}
+                onKeyDown={(e) => {
+                  if (e.nativeEvent.isComposing || e.keyCode === 229) return
+                  if (e.key === "Enter") e.currentTarget.blur()
+                }}
+                onBlur={() => commitSetpoint(Number.parseInt(entry, 10))}
+                className="w-20 rounded-lg bg-transparent text-center text-4xl font-semibold text-foreground tabular-nums outline-none focus:bg-elevated disabled:opacity-50"
+              />
+              <span className="text-2xl font-semibold text-muted">°</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => bumpSetpoint(1)}
+              disabled={busy || locked}
+              aria-label="Raise setpoint"
+              className="flex h-11 w-11 items-center justify-center rounded-full border border-border bg-elevated text-foreground transition-colors hover:bg-card disabled:opacity-50"
+            >
+              <Plus className="h-5 w-5" />
+            </button>
+          </div>
+          <p className="mb-4 text-center text-[11px] text-muted">
+            Type a temperature or tap +/− · one command sent (45–95°F)
+          </p>
+        </>
       ) : null}
 
       {/* Mode selector */}

@@ -3,6 +3,7 @@ import {
   fetchThermostat,
   getFreshAccessToken,
   nestConfigured,
+  cacheHvacStatus,
   NestAuthError,
   NestRateLimitError,
 } from "@/lib/nest/client"
@@ -23,6 +24,9 @@ export async function GET() {
       return NextResponse.json({ ok: true, configured: true, connected: false, thermostat: null })
     }
     const thermostat = await fetchThermostat(accessToken)
+    // Cache the on/off mode so the compute engine can use it as the
+    // authoritative run-state without making its own SDM call every tick.
+    if (thermostat?.hvacStatus) await cacheHvacStatus(thermostat.hvacStatus)
     return NextResponse.json({ ok: true, configured: true, connected: true, thermostat })
   } catch (err) {
     if (err instanceof NestAuthError) {

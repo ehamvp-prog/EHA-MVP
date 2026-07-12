@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react"
 import useSWR from "swr"
-import { DollarSign, Thermometer, Sun, Home as HomeIcon, Smile } from "lucide-react"
+import { DollarSign, Thermometer, Sun, Home as HomeIcon, Smile, RefreshCw } from "lucide-react"
 import { ComfortProfilePanel, HappyNumberPanel } from "./comfort-profile"
 import { NestCard } from "./nest-card"
 import { AutomationJournalCard } from "./automation-journal"
@@ -101,6 +101,10 @@ export function HomeView() {
     week_to_date: number
     today: number
   }>("/api/cost/history", fetcher, { refreshInterval: 60000 })
+  const { data: comfortHistory } = useSWR<{
+    days: { day: string; tempF: number; comfort: number; happy: number }[]
+    hours: { hour: number; tempF: number; comfort: number; happy: number }[]
+  }>("/api/comfort/history", fetcher, { refreshInterval: 60000 })
 
   // Persist on a cadence too, so Home View alone keeps history growing.
   useEffect(() => {
@@ -116,6 +120,7 @@ export function HomeView() {
   // numbers through the normal SWR fetches below.
 
   const [historyOpen, setHistoryOpen] = useState(false)
+  const [comfortHistoryOpen, setComfortHistoryOpen] = useState(false)
   const [subTab, setSubTab] = useState<"home" | "comfort">("home")
   const c = data?.computed
 
@@ -188,7 +193,7 @@ export function HomeView() {
           </span>
         </button>
         {historyOpen ? (
-          <CostChart days={history?.days ?? []} hours={history?.hours ?? []} />
+          <CostChart />
         ) : null}
       </div>
 
@@ -225,6 +230,22 @@ export function HomeView() {
           <p className="text-xs uppercase tracking-wider text-muted">Indoor humidity</p>
           <p className={`mt-1 text-base font-semibold text-pretty ${humidity.tone}`}>{humidity.label}</p>
         </div>
+
+        {/* Collapsible comfort history: indoor temp, comfort score, happy number */}
+        <button
+          type="button"
+          onClick={() => setComfortHistoryOpen((v) => !v)}
+          aria-expanded={comfortHistoryOpen}
+          className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-border bg-elevated px-4 py-2.5 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+        >
+          {comfortHistoryOpen ? "Hide" : "Show"} comfort history
+          <span aria-hidden className={`transition-transform ${comfortHistoryOpen ? "rotate-180" : ""}`}>
+            ⌄
+          </span>
+        </button>
+        {comfortHistoryOpen ? (
+          <ComfortChart days={comfortHistory?.days ?? []} hours={comfortHistory?.hours ?? []} />
+        ) : null}
       </div>
 
       {/* 5. Filter health — needle gauge driven by filter LOAD ratio */}
@@ -341,76 +362,116 @@ function dayShortLabel(iso: string): string {
   return `${wd} ${d}`
 }
 
-function CostChart({
-  days,
-  hours,
-}: {
-  days: { day: string; spend: number }[]
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+]
+
+type PeriodResponse = {
+  anchor: string
+  year: number
+  month: number
+  day: number
+  weekOfMonth: number
   hours: { hour: number; spend: number; tou: string }[]
-}) {
+  week: { day: string; spend: number }[]
+  weeks: { week: number; startDay: string; endDay: string; spend: number }[]
+  monthTotal: number
+  availableMonths: { year: number; month: number }[]
+}
+
+function pad2(n: number) {
+  return String(n).padStart(2, "0")
+}
+
+function CostChart() {
   const [mode, setMode] = useState<ChartMode>("daily")
 
+  // "Today" in Central time — the reset target and default anchor.
+  const nowCst = new Date(Date.now() - 6 * 60 * 60 * 1000)
+  const todayY = nowCst.getUTCFullYear()
+  const todayM = nowCst.getUTCMonth() + 1
+  const todayD = nowCst.getUTCDate()
+
+  // One shared calendar anchor drives ALL three tabs. Changing the month or
+  // year snaps the day back to the 1st (so "just a month" reads the start of
+  // the month for the daily/weekly views).
+  const [selYear, setSelYear] = useState(todayY)
+  const [selMonth, setSelMonth] = useState(todayM)
+  const [selDay, setSelDay] = useState(todayD)
+
+  const daysInMonth = new Date(Date.UTC(selYear, selMonth, 0)).getUTCDate()
+  const safeDay = Math.min(selDay, daysInMonth)
+  const anchorIso = `${selYear}-${pad2(selMonth)}-${pad2(safeDay)}`
+
+  // Single fetch returns hourly + weekly + monthly for the anchor, all
+  // zero-filled server-side so empty/future buckets still render as 0.
+  const { data, mutate } = useSWR<PeriodResponse>(
+    `/api/cost/period?date=${anchorIso}`,
+    fetcher,
+    { refreshInterval: 60000 },
+  )
+
+  const availableMonths = data?.availableMonths ?? [{ year: selYear, month: selMonth }]
+  const years = Array.from(new Set(availableMonths.map((a) => a.year))).sort((a, b) => b - a)
+  const monthsForYear = availableMonths.filter((a) => a.year === selYear).map((a) => a.month)
+
+  const isCurrent = selYear === todayY && selMonth === todayM && safeDay === todayD
+
+  // Bring the calendar (and data) back to the latest live readings.
+  function resetToNow() {
+    setSelYear(todayY)
+    setSelMonth(todayM)
+    setSelDay(todayD)
+    mutate()
+  }
+
+  // Anchor weekday (Central) decides on-peak hours for the daily TOU bands.
+  const anchorWeekday = new Date(Date.UTC(selYear, selMonth - 1, safeDay)).getUTCDay()
+  const isWeekday = anchorWeekday >= 1 && anchorWeekday <= 5
+
+  const monthLabel = `${MONTH_NAMES[selMonth - 1]} ${selYear}`
   const title =
     mode === "daily"
-      ? "Today's spending by hour"
+      ? `${MONTH_NAMES[selMonth - 1]} ${safeDay}, ${selYear} — hourly spending`
       : mode === "weekly"
-        ? "This week's spending"
-        : "This month's spending"
+        ? `Week ${data?.weekOfMonth ?? Math.min(Math.ceil(safeDay / 7), 5)} of ${monthLabel} — daily spending`
+        : `${monthLabel} — weekly spending`
 
-  // Build the bar set + a fallback message for the active mode.
+  // Build the (always zero-filled) bar set for the active tab.
   let bars: Bar[] = []
-  let fallback: string | null = null
-  let yUnitDigits = 2
-
   if (mode === "daily") {
-    const byHour = new Map(hours.map((h) => [h.hour, h]))
-    // Today's weekday in Central time decides whether on-peak applies.
-    const nowCst = new Date(Date.now() - 6 * 60 * 60 * 1000)
-    const dow = nowCst.getUTCDay() // 0 Sun … 6 Sat
-    const isWeekday = dow >= 1 && dow <= 5
+    const byHour = new Map((data?.hours ?? []).map((h) => [h.hour, h]))
     bars = Array.from({ length: 24 }, (_, h) => {
-      const rec = byHour.get(h)
       const tou =
         h < 6 ? "super_off_peak" : isWeekday && h >= 16 && h < 20 ? "on_peak" : "off_peak"
       return {
         key: `h${h}`,
         label: hourLabel(h),
         show: h % 6 === 0 || h === 23,
-        value: rec?.spend ?? 0,
+        value: byHour.get(h)?.spend ?? 0,
         tou,
       }
     })
-    if (!bars.some((b) => b.value > 0)) {
-      fallback = "No runtime recorded yet today. Your hourly spending will appear here as the system runs."
-    }
   } else if (mode === "weekly") {
-    const recent = days.slice(-7)
-    if (recent.length < 2) {
-      fallback = "Still collecting — check back in a day or two."
-    } else {
-      bars = recent.map((d) => ({
-        key: d.day,
-        label: dayShortLabel(d.day),
-        show: true,
-        value: d.spend,
-      }))
-    }
+    bars = (data?.week ?? []).map((d) => ({
+      key: d.day,
+      label: dayShortLabel(d.day),
+      show: true,
+      value: d.spend,
+    }))
   } else {
-    // Monthly: all days in the current calendar month (Central).
-    const nowCst = new Date(Date.now() - 6 * 60 * 60 * 1000)
-    const ym = `${nowCst.getUTCFullYear()}-${String(nowCst.getUTCMonth() + 1).padStart(2, "0")}`
-    const monthDays = days.filter((d) => d.day.startsWith(ym))
-    if (monthDays.length < 2) {
-      fallback = "Still collecting — check back in a day or two."
-    } else {
-      bars = monthDays.map((d) => ({
-        key: d.day,
-        label: String(Number(d.day.slice(8, 10))),
-        show: true,
-        value: d.spend,
-      }))
-    }
+    bars = (data?.weeks ?? []).map((w) => ({
+      key: `w${w.week}`,
+      label: `Wk ${w.week}`,
+      show: true,
+      value: w.spend,
+    }))
   }
+
+  const periodTotal =
+    mode === "monthly" ? (data?.monthTotal ?? 0) : bars.reduce((s, b) => s + b.value, 0)
+  const totalLabel = mode === "daily" ? "Day total" : mode === "weekly" ? "Week total" : "Month total"
 
   return (
     <div className="mt-3 rounded-xl border border-accent/40 bg-elevated p-4">
@@ -436,16 +497,81 @@ function CostChart({
         ))}
       </div>
 
-      <h4 className="mb-2 text-center text-sm font-semibold text-foreground">{title}</h4>
+      {/* Shared calendar: month + day + year apply to every tab, plus a
+          refresh button that jumps back to the latest readings. */}
+      <div className="mb-3 flex items-center gap-2">
+        <select
+          aria-label="Select month"
+          value={selMonth}
+          onChange={(e) => {
+            setSelMonth(Number(e.target.value))
+            setSelDay(1)
+          }}
+          className="min-w-0 flex-1 rounded-lg border border-border bg-card px-2 py-1.5 text-xs font-medium text-foreground outline-none focus:border-accent"
+        >
+          {monthsForYear.map((m) => (
+            <option key={m} value={m}>
+              {MONTH_NAMES[m - 1]}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Select day"
+          value={safeDay}
+          onChange={(e) => setSelDay(Number(e.target.value))}
+          className="w-16 rounded-lg border border-border bg-card px-2 py-1.5 text-xs font-medium text-foreground outline-none focus:border-accent"
+        >
+          {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((d) => (
+            <option key={d} value={d}>
+              {d}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Select year"
+          value={selYear}
+          onChange={(e) => {
+            const y = Number(e.target.value)
+            setSelYear(y)
+            const valid = availableMonths.filter((a) => a.year === y).map((a) => a.month)
+            if (valid.length && !valid.includes(selMonth)) setSelMonth(Math.max(...valid))
+            setSelDay(1)
+          }}
+          className="w-20 rounded-lg border border-border bg-card px-2 py-1.5 text-xs font-medium text-foreground outline-none focus:border-accent"
+        >
+          {years.map((y) => (
+            <option key={y} value={y}>
+              {y}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          onClick={resetToNow}
+          disabled={isCurrent}
+          aria-label="Refresh to current readings"
+          title="Back to current readings"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border bg-card text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <RefreshCw className="h-4 w-4" />
+        </button>
+      </div>
 
-      {fallback ? (
+      <h4 className="mb-2 text-center text-sm font-semibold text-foreground text-pretty">{title}</h4>
+
+      {!data ? (
         <p className="rounded-lg border border-border bg-card px-4 py-8 text-center text-sm text-muted">
-          {fallback}
+          Loading…
         </p>
       ) : (
         <>
-          <BarChartSvg bars={bars} digits={yUnitDigits} showBands={mode === "daily"} />
+          <BarChartSvg bars={bars} digits={2} showBands={mode === "daily"} />
           {mode === "daily" ? <TouLegend /> : null}
+          <p className="mt-2 text-center text-xs text-muted">
+            {totalLabel}:{" "}
+            <span className="font-semibold text-foreground tabular-nums">${periodTotal.toFixed(2)}</span>
+            {periodTotal === 0 ? <span className="ml-1 text-muted">· no spending recorded</span> : null}
+          </p>
         </>
       )}
     </div>
@@ -589,6 +715,283 @@ function TouLegend() {
       <span className="flex items-center gap-1.5">
         <span className="h-2.5 w-2.5 rounded-sm" style={{ background: "rgba(245, 128, 61, 0.4)" }} aria-hidden />
         On-peak
+      </span>
+    </div>
+  )
+}
+
+// ---- Comfort-over-time chart ----------------------------------------------
+// Three line series on the SAME time axis as the cost chart: indoor temp (°F,
+// left axis) plus comfort score and happy number (0–100, right axis). Each
+// series gets a unique color. Daily = today's hours, Weekly = last 7 days,
+// Monthly = current calendar month.
+
+type ComfortPoint = { label: string; show: boolean; tempF: number | null; comfort: number | null; happy: number | null }
+
+// Distinct, on-palette colors for the three series.
+const COMFORT_COLORS = {
+  temp: "var(--color-primary)", // teal — indoor temperature
+  comfort: "var(--color-accent)", // blue — comfort score
+  happy: "var(--color-warn)", // amber — happy number
+} as const
+
+function ComfortChart({
+  days,
+  hours,
+}: {
+  days: { day: string; tempF: number; comfort: number; happy: number }[]
+  hours: { hour: number; tempF: number; comfort: number; happy: number }[]
+}) {
+  const [mode, setMode] = useState<ChartMode>("daily")
+
+  const title =
+    mode === "daily"
+      ? "Today's comfort by hour"
+      : mode === "weekly"
+        ? "This week's comfort"
+        : "This month's comfort"
+
+  let points: ComfortPoint[] = []
+  let fallback: string | null = null
+
+  if (mode === "daily") {
+    const byHour = new Map(hours.map((h) => [h.hour, h]))
+    points = Array.from({ length: 24 }, (_, h) => {
+      const rec = byHour.get(h)
+      return {
+        label: hourLabel(h),
+        show: h % 6 === 0 || h === 23,
+        tempF: rec?.tempF ?? null,
+        comfort: rec?.comfort ?? null,
+        happy: rec?.happy ?? null,
+      }
+    })
+    if (!points.some((p) => p.tempF != null)) {
+      fallback = "No readings recorded yet today. Your comfort history will appear here as the system runs."
+    }
+  } else if (mode === "weekly") {
+    const recent = days.slice(-7)
+    if (recent.length < 2) {
+      fallback = "Still collecting — check back in a day or two."
+    } else {
+      points = recent.map((d) => ({
+        label: dayShortLabel(d.day),
+        show: true,
+        tempF: d.tempF,
+        comfort: d.comfort,
+        happy: d.happy,
+      }))
+    }
+  } else {
+    const nowCst = new Date(Date.now() - 6 * 60 * 60 * 1000)
+    const ym = `${nowCst.getUTCFullYear()}-${String(nowCst.getUTCMonth() + 1).padStart(2, "0")}`
+    const monthDays = days.filter((d) => d.day.startsWith(ym))
+    if (monthDays.length < 2) {
+      fallback = "Still collecting — check back in a day or two."
+    } else {
+      points = monthDays.map((d) => ({
+        label: String(Number(d.day.slice(8, 10))),
+        show: true,
+        tempF: d.tempF,
+        comfort: d.comfort,
+        happy: d.happy,
+      }))
+    }
+  }
+
+  return (
+    <div className="mt-3 rounded-xl border border-primary/40 bg-elevated p-4">
+      {/* Granularity toggle */}
+      <div
+        className="mb-3 flex items-center gap-1 rounded-lg border border-border bg-card p-0.5"
+        role="tablist"
+        aria-label="Comfort range"
+      >
+        {(["daily", "weekly", "monthly"] as ChartMode[]).map((m) => (
+          <button
+            key={m}
+            type="button"
+            role="tab"
+            aria-selected={mode === m}
+            onClick={() => setMode(m)}
+            className={`flex-1 rounded-md px-2 py-1 text-xs font-medium capitalize transition-colors ${
+              mode === m ? "bg-primary text-primary-foreground" : "text-muted hover:text-foreground"
+            }`}
+          >
+            {m}
+          </button>
+        ))}
+      </div>
+
+      <h4 className="mb-2 text-center text-sm font-semibold text-foreground">{title}</h4>
+
+      {fallback ? (
+        <p className="rounded-lg border border-border bg-card px-4 py-8 text-center text-sm text-muted">
+          {fallback}
+        </p>
+      ) : (
+        <>
+          <ComfortLineSvg points={points} />
+          <ComfortLegend />
+        </>
+      )}
+    </div>
+  )
+}
+
+// Pure SVG multi-line chart with dual y-axes: °F on the left (temp), 0–100 on
+// the right (comfort score + happy number).
+function ComfortLineSvg({ points }: { points: ComfortPoint[] }) {
+  const W = 340
+  const H = 200
+  const ml = 30
+  const mr = 30
+  const mt = 12
+  const mb = 22
+  const plotX0 = ml
+  const plotX1 = W - mr
+  const plotW = plotX1 - plotX0
+  const plotY0 = mt
+  const plotY1 = H - mb
+  const plotH = plotY1 - plotY0
+
+  const n = points.length
+  const xOf = (i: number) => (n <= 1 ? plotX0 + plotW / 2 : plotX0 + (i / (n - 1)) * plotW)
+
+  // Left axis: temperature, padded to a clean range around the data.
+  const temps = points.map((p) => p.tempF).filter((v): v is number => v != null)
+  const tMinRaw = temps.length ? Math.min(...temps) : 65
+  const tMaxRaw = temps.length ? Math.max(...temps) : 80
+  const tMin = Math.floor((tMinRaw - 2) / 5) * 5
+  const tMax = Math.ceil((tMaxRaw + 2) / 5) * 5
+  const tSpan = Math.max(tMax - tMin, 1)
+  const yTemp = (v: number) => plotY1 - ((v - tMin) / tSpan) * plotH
+
+  // Right axis: scores fixed 0–100.
+  const yScore = (v: number) => plotY1 - (v / 100) * plotH
+
+  // Build an SVG polyline path from a series, skipping null gaps.
+  const pathFor = (key: "tempF" | "comfort" | "happy", y: (v: number) => number) => {
+    let d = ""
+    let pen = false
+    points.forEach((p, i) => {
+      const v = p[key]
+      if (v == null) {
+        pen = false
+        return
+      }
+      d += `${pen ? "L" : "M"}${xOf(i).toFixed(1)},${y(v).toFixed(1)} `
+      pen = true
+    })
+    return d.trim()
+  }
+
+  const tempPath = pathFor("tempF", yTemp)
+  const comfortPath = pathFor("comfort", yScore)
+  const happyPath = pathFor("happy", yScore)
+
+  const tempTicks = [tMin, Math.round((tMin + tMax) / 2), tMax]
+  const scoreTicks = [0, 50, 100]
+
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      className="w-full"
+      role="img"
+      aria-label="Comfort history line chart: indoor temperature, comfort score, and happy number"
+      style={{ height: "auto" }}
+    >
+      {/* Horizontal gridlines aligned to the score axis */}
+      {scoreTicks.map((t, i) => {
+        const y = yScore(t)
+        return (
+          <line
+            key={`grid-${i}`}
+            x1={plotX0}
+            y1={y}
+            x2={plotX1}
+            y2={y}
+            stroke="var(--color-border)"
+            strokeWidth={1}
+          />
+        )
+      })}
+
+      {/* Left axis labels (°F) */}
+      {tempTicks.map((t, i) => (
+        <text
+          key={`lt-${i}`}
+          x={plotX0 - 4}
+          y={yTemp(t) + 3}
+          textAnchor="end"
+          fontSize={8}
+          fill={COMFORT_COLORS.temp}
+        >
+          {`${t}°`}
+        </text>
+      ))}
+
+      {/* Right axis labels (score 0–100) */}
+      {scoreTicks.map((t, i) => (
+        <text
+          key={`rs-${i}`}
+          x={plotX1 + 4}
+          y={yScore(t) + 3}
+          textAnchor="start"
+          fontSize={8}
+          fill="var(--color-muted)"
+        >
+          {t}
+        </text>
+      ))}
+
+      {/* Series */}
+      {happyPath ? (
+        <path d={happyPath} fill="none" stroke={COMFORT_COLORS.happy} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+      ) : null}
+      {comfortPath ? (
+        <path d={comfortPath} fill="none" stroke={COMFORT_COLORS.comfort} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+      ) : null}
+      {tempPath ? (
+        <path d={tempPath} fill="none" stroke={COMFORT_COLORS.temp} strokeWidth={2} strokeDasharray="4 3" strokeLinejoin="round" strokeLinecap="round" />
+      ) : null}
+
+      {/* X axis line */}
+      <line x1={plotX0} y1={plotY1} x2={plotX1} y2={plotY1} stroke="var(--color-border)" strokeWidth={1} />
+
+      {/* X labels (subset) */}
+      {points.map((p, i) =>
+        p.show ? (
+          <text
+            key={`cx-${i}`}
+            x={xOf(i)}
+            y={plotY1 + 13}
+            textAnchor="middle"
+            fontSize={9}
+            fill="var(--color-muted)"
+          >
+            {p.label}
+          </text>
+        ) : null,
+      )}
+    </svg>
+  )
+}
+
+function ComfortLegend() {
+  return (
+    <div className="mt-2 flex flex-wrap items-center justify-center gap-4 text-[10px] text-muted">
+      <span className="flex items-center gap-1.5">
+        <span className="h-0.5 w-3.5 rounded-full" style={{ background: COMFORT_COLORS.temp }} aria-hidden />
+        Indoor temp (°F)
+      </span>
+      <span className="flex items-center gap-1.5">
+        <span className="h-0.5 w-3.5 rounded-full" style={{ background: COMFORT_COLORS.comfort }} aria-hidden />
+        Comfort score
+      </span>
+      <span className="flex items-center gap-1.5">
+        <span className="h-0.5 w-3.5 rounded-full" style={{ background: COMFORT_COLORS.happy }} aria-hidden />
+        Happy number
       </span>
     </div>
   )

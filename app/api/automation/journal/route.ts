@@ -15,7 +15,7 @@ export async function GET(request: Request) {
       .select("*")
       .eq("site_id", siteId)
       .order("occurred_at", { ascending: false })
-      .limit(50)
+      .limit(500)
     if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 })
     return NextResponse.json({ ok: true, entries: data ?? [] })
   } catch (err) {
