@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react"
 import useSWR from "swr"
-import { DollarSign, Thermometer, Sun, Home as HomeIcon, Smile } from "lucide-react"
+import { DollarSign, Thermometer, Sun, Home as HomeIcon, Smile, RefreshCw } from "lucide-react"
 import { ComfortProfilePanel, HappyNumberPanel } from "./comfort-profile"
 import { NestCard } from "./nest-card"
 import { AutomationJournalCard } from "./automation-journal"
@@ -193,7 +193,7 @@ export function HomeView() {
           </span>
         </button>
         {historyOpen ? (
-          <CostChart days={history?.days ?? []} hours={history?.hours ?? []} />
+          <CostChart />
         ) : null}
       </div>
 
@@ -367,100 +367,111 @@ const MONTH_NAMES = [
   "July", "August", "September", "October", "November", "December",
 ]
 
-type MonthlyResponse = {
+type PeriodResponse = {
+  anchor: string
   year: number
   month: number
+  day: number
+  weekOfMonth: number
+  hours: { hour: number; spend: number; tou: string }[]
+  week: { day: string; spend: number }[]
   weeks: { week: number; startDay: string; endDay: string; spend: number }[]
-  total: number
+  monthTotal: number
   availableMonths: { year: number; month: number }[]
 }
 
-function CostChart({
-  days,
-  hours,
-}: {
-  days: { day: string; spend: number }[]
-  hours: { hour: number; spend: number; tou: string }[]
-}) {
+function pad2(n: number) {
+  return String(n).padStart(2, "0")
+}
+
+function CostChart() {
   const [mode, setMode] = useState<ChartMode>("daily")
 
-  // Selected month/year for the monthly view. Defaults to the current
-  // Central-time month; the picker only offers months that have data.
+  // "Today" in Central time — the reset target and default anchor.
   const nowCst = new Date(Date.now() - 6 * 60 * 60 * 1000)
-  const [selYear, setSelYear] = useState(nowCst.getUTCFullYear())
-  const [selMonth, setSelMonth] = useState(nowCst.getUTCMonth() + 1)
+  const todayY = nowCst.getUTCFullYear()
+  const todayM = nowCst.getUTCMonth() + 1
+  const todayD = nowCst.getUTCDate()
 
-  // Fetch weekly spend for the selected month only while the monthly tab is
-  // active (conditional SWR key avoids needless requests).
-  const { data: monthly } = useSWR<MonthlyResponse>(
-    mode === "monthly" ? `/api/cost/monthly?year=${selYear}&month=${selMonth}` : null,
+  // One shared calendar anchor drives ALL three tabs. Changing the month or
+  // year snaps the day back to the 1st (so "just a month" reads the start of
+  // the month for the daily/weekly views).
+  const [selYear, setSelYear] = useState(todayY)
+  const [selMonth, setSelMonth] = useState(todayM)
+  const [selDay, setSelDay] = useState(todayD)
+
+  const daysInMonth = new Date(Date.UTC(selYear, selMonth, 0)).getUTCDate()
+  const safeDay = Math.min(selDay, daysInMonth)
+  const anchorIso = `${selYear}-${pad2(selMonth)}-${pad2(safeDay)}`
+
+  // Single fetch returns hourly + weekly + monthly for the anchor, all
+  // zero-filled server-side so empty/future buckets still render as 0.
+  const { data, mutate } = useSWR<PeriodResponse>(
+    `/api/cost/period?date=${anchorIso}`,
     fetcher,
+    { refreshInterval: 60000 },
   )
-  const availableMonths = monthly?.availableMonths ?? [{ year: selYear, month: selMonth }]
+
+  const availableMonths = data?.availableMonths ?? [{ year: selYear, month: selMonth }]
   const years = Array.from(new Set(availableMonths.map((a) => a.year))).sort((a, b) => b - a)
   const monthsForYear = availableMonths.filter((a) => a.year === selYear).map((a) => a.month)
 
+  const isCurrent = selYear === todayY && selMonth === todayM && safeDay === todayD
+
+  // Bring the calendar (and data) back to the latest live readings.
+  function resetToNow() {
+    setSelYear(todayY)
+    setSelMonth(todayM)
+    setSelDay(todayD)
+    mutate()
+  }
+
+  // Anchor weekday (Central) decides on-peak hours for the daily TOU bands.
+  const anchorWeekday = new Date(Date.UTC(selYear, selMonth - 1, safeDay)).getUTCDay()
+  const isWeekday = anchorWeekday >= 1 && anchorWeekday <= 5
+
+  const monthLabel = `${MONTH_NAMES[selMonth - 1]} ${selYear}`
   const title =
     mode === "daily"
-      ? "Today's spending by hour"
+      ? `${MONTH_NAMES[selMonth - 1]} ${safeDay}, ${selYear} — hourly spending`
       : mode === "weekly"
-        ? "This week's spending"
-        : `${MONTH_NAMES[selMonth - 1]} ${selYear} — weekly spending`
+        ? `Week ${data?.weekOfMonth ?? Math.min(Math.ceil(safeDay / 7), 5)} of ${monthLabel} — daily spending`
+        : `${monthLabel} — weekly spending`
 
-  // Build the bar set + a fallback message for the active mode.
+  // Build the (always zero-filled) bar set for the active tab.
   let bars: Bar[] = []
-  let fallback: string | null = null
-  let yUnitDigits = 2
-
   if (mode === "daily") {
-    const byHour = new Map(hours.map((h) => [h.hour, h]))
-    // Today's weekday in Central time decides whether on-peak applies.
-    const nowCst = new Date(Date.now() - 6 * 60 * 60 * 1000)
-    const dow = nowCst.getUTCDay() // 0 Sun … 6 Sat
-    const isWeekday = dow >= 1 && dow <= 5
+    const byHour = new Map((data?.hours ?? []).map((h) => [h.hour, h]))
     bars = Array.from({ length: 24 }, (_, h) => {
-      const rec = byHour.get(h)
       const tou =
         h < 6 ? "super_off_peak" : isWeekday && h >= 16 && h < 20 ? "on_peak" : "off_peak"
       return {
         key: `h${h}`,
         label: hourLabel(h),
         show: h % 6 === 0 || h === 23,
-        value: rec?.spend ?? 0,
+        value: byHour.get(h)?.spend ?? 0,
         tou,
       }
     })
-    if (!bars.some((b) => b.value > 0)) {
-      fallback = "No runtime recorded yet today. Your hourly spending will appear here as the system runs."
-    }
   } else if (mode === "weekly") {
-    const recent = days.slice(-7)
-    if (recent.length < 2) {
-      fallback = "Still collecting — check back in a day or two."
-    } else {
-      bars = recent.map((d) => ({
-        key: d.day,
-        label: dayShortLabel(d.day),
-        show: true,
-        value: d.spend,
-      }))
-    }
+    bars = (data?.week ?? []).map((d) => ({
+      key: d.day,
+      label: dayShortLabel(d.day),
+      show: true,
+      value: d.spend,
+    }))
   } else {
-    // Monthly: one bar per week of the selected calendar month.
-    const weeks = monthly?.weeks ?? []
-    if (!monthly) {
-      fallback = "Loading…"
-    } else if (weeks.length === 0) {
-      fallback = "No spending recorded for this month yet."
-    } else {
-      bars = weeks.map((w) => ({
-        key: `w${w.week}`,
-        label: `Wk ${w.week}`,
-        show: true,
-        value: w.spend,
-      }))
-    }
+    bars = (data?.weeks ?? []).map((w) => ({
+      key: `w${w.week}`,
+      label: `Wk ${w.week}`,
+      show: true,
+      value: w.spend,
+    }))
   }
+
+  const periodTotal =
+    mode === "monthly" ? (data?.monthTotal ?? 0) : bars.reduce((s, b) => s + b.value, 0)
+  const totalLabel = mode === "daily" ? "Day total" : mode === "weekly" ? "Week total" : "Month total"
 
   return (
     <div className="mt-3 rounded-xl border border-accent/40 bg-elevated p-4">
@@ -486,60 +497,81 @@ function CostChart({
         ))}
       </div>
 
-      {/* Month + year selector (monthly view only) */}
-      {mode === "monthly" ? (
-        <div className="mb-3 flex items-center gap-2">
-          <select
-            aria-label="Select month"
-            value={selMonth}
-            onChange={(e) => setSelMonth(Number(e.target.value))}
-            className="flex-1 rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground outline-none focus:border-accent"
-          >
-            {monthsForYear.map((m) => (
-              <option key={m} value={m}>
-                {MONTH_NAMES[m - 1]}
-              </option>
-            ))}
-          </select>
-          <select
-            aria-label="Select year"
-            value={selYear}
-            onChange={(e) => {
-              const y = Number(e.target.value)
-              setSelYear(y)
-              // Snap the month to a valid one for the new year.
-              const valid = availableMonths.filter((a) => a.year === y).map((a) => a.month)
-              if (valid.length && !valid.includes(selMonth)) setSelMonth(Math.max(...valid))
-            }}
-            className="w-24 rounded-lg border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground outline-none focus:border-accent"
-          >
-            {years.map((y) => (
-              <option key={y} value={y}>
-                {y}
-              </option>
-            ))}
-          </select>
-        </div>
-      ) : null}
+      {/* Shared calendar: month + day + year apply to every tab, plus a
+          refresh button that jumps back to the latest readings. */}
+      <div className="mb-3 flex items-center gap-2">
+        <select
+          aria-label="Select month"
+          value={selMonth}
+          onChange={(e) => {
+            setSelMonth(Number(e.target.value))
+            setSelDay(1)
+          }}
+          className="min-w-0 flex-1 rounded-lg border border-border bg-card px-2 py-1.5 text-xs font-medium text-foreground outline-none focus:border-accent"
+        >
+          {monthsForYear.map((m) => (
+            <option key={m} value={m}>
+              {MONTH_NAMES[m - 1]}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Select day"
+          value={safeDay}
+          onChange={(e) => setSelDay(Number(e.target.value))}
+          className="w-16 rounded-lg border border-border bg-card px-2 py-1.5 text-xs font-medium text-foreground outline-none focus:border-accent"
+        >
+          {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((d) => (
+            <option key={d} value={d}>
+              {d}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Select year"
+          value={selYear}
+          onChange={(e) => {
+            const y = Number(e.target.value)
+            setSelYear(y)
+            const valid = availableMonths.filter((a) => a.year === y).map((a) => a.month)
+            if (valid.length && !valid.includes(selMonth)) setSelMonth(Math.max(...valid))
+            setSelDay(1)
+          }}
+          className="w-20 rounded-lg border border-border bg-card px-2 py-1.5 text-xs font-medium text-foreground outline-none focus:border-accent"
+        >
+          {years.map((y) => (
+            <option key={y} value={y}>
+              {y}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          onClick={resetToNow}
+          disabled={isCurrent}
+          aria-label="Refresh to current readings"
+          title="Back to current readings"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border bg-card text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <RefreshCw className="h-4 w-4" />
+        </button>
+      </div>
 
       <h4 className="mb-2 text-center text-sm font-semibold text-foreground text-pretty">{title}</h4>
 
-      {fallback ? (
+      {!data ? (
         <p className="rounded-lg border border-border bg-card px-4 py-8 text-center text-sm text-muted">
-          {fallback}
+          Loading…
         </p>
       ) : (
         <>
-          <BarChartSvg bars={bars} digits={yUnitDigits} showBands={mode === "daily"} />
+          <BarChartSvg bars={bars} digits={2} showBands={mode === "daily"} />
           {mode === "daily" ? <TouLegend /> : null}
-          {mode === "monthly" && monthly ? (
-            <p className="mt-2 text-center text-xs text-muted">
-              Month total:{" "}
-              <span className="font-semibold text-foreground tabular-nums">
-                ${monthly.total.toFixed(2)}
-              </span>
-            </p>
-          ) : null}
+          <p className="mt-2 text-center text-xs text-muted">
+            {totalLabel}:{" "}
+            <span className="font-semibold text-foreground tabular-nums">${periodTotal.toFixed(2)}</span>
+            {periodTotal === 0 ? <span className="ml-1 text-muted">· no spending recorded</span> : null}
+          </p>
         </>
       )}
     </div>
