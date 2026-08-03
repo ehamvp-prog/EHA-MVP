@@ -90,17 +90,16 @@ export function HomeView() {
   const { data } = useSWR<{ ok: boolean; computed: Computed }>("/api/compute/live", fetcher, {
     refreshInterval: 5000,
   })
-  const { data: cost } = useSWR<{ accumulated_cost: number; customer_charge: number }>(
+  const { data: cost } = useSWR<{ total_with_base_charge: number; energy_cost: number; customer_charge: number }>(
     "/api/cost/summary",
     fetcher,
     { refreshInterval: 15000 },
   )
-  const { data: history } = useSWR<{
-    days: { day: string; spend: number }[]
-    hours: { hour: number; spend: number; tou: string }[]
-    week_to_date: number
-    today: number
-  }>("/api/cost/history", fetcher, { refreshInterval: 60000 })
+  const { data: history } = useSWR<{ week_to_date: number; today: number }>(
+    "/api/cost/history",
+    fetcher,
+    { refreshInterval: 60000 },
+  )
   const { data: comfortHistory } = useSWR<{
     days: { day: string; tempF: number; comfort: number; happy: number }[]
     hours: { hour: number; tempF: number; comfort: number; happy: number }[]
@@ -174,7 +173,7 @@ export function HomeView() {
         <div className="grid grid-cols-3 gap-3">
           <CostTile label="Right now" value={c?.cost_per_hour != null ? `${money(c.cost_per_hour)}` : "—"} sub="per hour" big />
           <CostTile label="This week" value={money(history?.week_to_date)} sub="energy used" />
-          <CostTile label="This month" value={money(cost?.accumulated_cost)} sub="so far" />
+          <CostTile label="This month" value={money(cost?.total_with_base_charge)} sub="so far" />
         </div>
         <p className="mt-3 text-center text-xs text-muted-foreground">
           Includes your {money(cost?.customer_charge)} monthly Evergy base charge.
@@ -231,7 +230,7 @@ export function HomeView() {
           <p className={`mt-1 text-base font-semibold text-pretty ${humidity.tone}`}>{humidity.label}</p>
         </div>
 
-        {/* Collapsible comfort history: indoor temp, comfort score, happy number */}
+        {/* Collapsible comfort history: return air temp, comfort score, happy number */}
         <button
           type="button"
           onClick={() => setComfortHistoryOpen((v) => !v)}
@@ -721,7 +720,7 @@ function TouLegend() {
 }
 
 // ---- Comfort-over-time chart ----------------------------------------------
-// Three line series on the SAME time axis as the cost chart: indoor temp (°F,
+  // Three line series on the SAME time axis as the cost chart: return air (°F,
 // left axis) plus comfort score and happy number (0–100, right axis). Each
 // series gets a unique color. Daily = today's hours, Weekly = last 7 days,
 // Monthly = current calendar month.
@@ -898,7 +897,7 @@ function ComfortLineSvg({ points }: { points: ComfortPoint[] }) {
       viewBox={`0 0 ${W} ${H}`}
       className="w-full"
       role="img"
-      aria-label="Comfort history line chart: indoor temperature, comfort score, and happy number"
+      aria-label="Comfort history line chart: return air temperature, comfort score, and happy number"
       style={{ height: "auto" }}
     >
       {/* Horizontal gridlines aligned to the score axis */}
@@ -983,7 +982,7 @@ function ComfortLegend() {
     <div className="mt-2 flex flex-wrap items-center justify-center gap-4 text-[10px] text-muted">
       <span className="flex items-center gap-1.5">
         <span className="h-0.5 w-3.5 rounded-full" style={{ background: COMFORT_COLORS.temp }} aria-hidden />
-        Indoor temp (°F)
+        Return air (°F)
       </span>
       <span className="flex items-center gap-1.5">
         <span className="h-0.5 w-3.5 rounded-full" style={{ background: COMFORT_COLORS.comfort }} aria-hidden />

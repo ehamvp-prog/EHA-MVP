@@ -1,14 +1,16 @@
 // =====================================================================
 // GET /api/cost/period?date=YYYY-MM-DD
 // Read-only. Returns ENERGY spend for a single anchor day, resolved for all
-// three chart granularities at once:
+// three chart granularities at once, sourced from the energy ledger views
+// (energy_minutes / energy_daily / energy_monthly), which are computed every
+// minute by cron from raw telemetry and bucketed in America/Chicago:
 //   - hours:  hourly spend for the anchor day (0..23, zero-filled)
 //   - week:   daily spend for the week-of-month containing the anchor,
 //             zero-filled across every day in that calendar-week chunk
-//   - month:  weekly spend for the anchor's month (weeks 1..N, zero-filled)
+//   - weeks:  weekly spend for the anchor's month (weeks 1..N, zero-filled)
 // plus the set of selectable months. Buckets with no data or in the future
-// are returned with spend 0 so they stay visible on the chart.
-// Changes no data.
+// are returned with spend 0 so they stay visible on the chart. Reads NO
+// accumulated_cost. Changes no data.
 // =====================================================================
 
 import { NextResponse } from "next/server"
@@ -17,10 +19,42 @@ import { SITE_ID } from "@/lib/compute-reading"
 
 export const dynamic = "force-dynamic"
 
-const CST_OFFSET_MS = 6 * 60 * 60 * 1000
-
 function iso(y: number, m: number, d: number) {
   return `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`
+}
+
+// Today's date parts in America/Chicago (real tz conversion, DST-correct).
+function chicagoTodayParts(d = new Date()): { year: number; month: number; day: number } {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(d)
+  return {
+    year: Number(parts.find((p) => p.type === "year")!.value),
+    month: Number(parts.find((p) => p.type === "month")!.value),
+    day: Number(parts.find((p) => p.type === "day")!.value),
+  }
+}
+
+// Chicago-local date + hour for a UTC instant, used to bucket minute rows.
+const CHI_HM = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "America/Chicago",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  hour12: false,
+})
+function chicagoDateHour(instant: Date): { date: string; hour: number } {
+  const parts = CHI_HM.formatToParts(instant)
+  const y = parts.find((p) => p.type === "year")!.value
+  const m = parts.find((p) => p.type === "month")!.value
+  const d = parts.find((p) => p.type === "day")!.value
+  // hour12:false can emit "24" at midnight in some runtimes; normalize to 0.
+  const hour = Number(parts.find((p) => p.type === "hour")!.value) % 24
+  return { date: `${y}-${m}-${d}`, hour }
 }
 
 export async function GET(request: Request) {
@@ -28,13 +62,13 @@ export async function GET(request: Request) {
     const supabase = createAdminClient()
     const { searchParams } = new URL(request.url)
 
-    // Anchor day in Central time; default to today (CST).
-    const nowCst = new Date(Date.now() - CST_OFFSET_MS)
+    // Anchor day in Central time; default to today (Chicago).
+    const todayParts = chicagoTodayParts()
     const raw = searchParams.get("date")
     const parsed = raw && /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw.split("-").map(Number) : null
-    const year = parsed ? parsed[0] : nowCst.getUTCFullYear()
-    const month = parsed ? parsed[1] : nowCst.getUTCMonth() + 1
-    const day = parsed ? parsed[2] : nowCst.getUTCDate()
+    const year = parsed ? parsed[0] : todayParts.year
+    const month = parsed ? parsed[1] : todayParts.month
+    const day = parsed ? parsed[2] : todayParts.day
 
     const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate()
     const safeDay = Math.min(Math.max(day, 1), daysInMonth)
@@ -44,53 +78,75 @@ export async function GET(request: Request) {
     const weekOfMonth = Math.min(Math.ceil(safeDay / 7), 5)
     const weekStartDay = (weekOfMonth - 1) * 7 + 1
     const weekEndDay = Math.min(weekOfMonth * 7, daysInMonth)
-    const weekStart = iso(year, month, weekStartDay)
-    const weekEnd = iso(year, month, weekEndDay)
 
-    const [hourly, weekRange, monthWeeks, earliest] = await Promise.all([
-      supabase.rpc("hourly_cost_for_day", { p_site_id: SITE_ID, p_day: anchor }),
-      supabase.rpc("daily_cost_for_range", { p_site_id: SITE_ID, p_start: weekStart, p_end: weekEnd }),
-      supabase.rpc("weekly_cost_for_month", { p_site_id: SITE_ID, p_year: year, p_month: month }),
+    const monthStart = iso(year, month, 1)
+    const monthEnd = iso(year, month, daysInMonth)
+
+    // UTC window covering the anchor Chicago day with generous padding so we
+    // can bucket minute rows by their true Chicago hour regardless of offset.
+    const dayAnchorMs = new Date(`${anchor}T00:00:00Z`).getTime()
+    const minutesFrom = new Date(dayAnchorMs - 6 * 3600_000).toISOString()
+    const minutesTo = new Date(dayAnchorMs + 30 * 3600_000).toISOString()
+
+    const [minuteRows, monthDaysRes, monthsRes] = await Promise.all([
       supabase
-        .from("computed_readings")
-        .select("reading_at")
+        .from("energy_minutes")
+        .select("minute, cost, tou_period")
         .eq("site_id", SITE_ID)
-        .order("reading_at", { ascending: true })
-        .limit(1),
+        .gte("minute", minutesFrom)
+        .lt("minute", minutesTo),
+      supabase
+        .from("energy_daily")
+        .select("day_local, cost")
+        .eq("site_id", SITE_ID)
+        .gte("day_local", monthStart)
+        .lte("day_local", monthEnd),
+      supabase
+        .from("energy_monthly")
+        .select("month_local")
+        .eq("site_id", SITE_ID)
+        .order("month_local", { ascending: false }),
     ])
-    if (hourly.error) throw hourly.error
-    if (weekRange.error) throw weekRange.error
-    if (monthWeeks.error) throw monthWeeks.error
+    if (minuteRows.error) throw minuteRows.error
+    if (monthDaysRes.error) throw monthDaysRes.error
+    if (monthsRes.error) throw monthsRes.error
 
-    // ---- Hours (0..23, zero-filled) ----
-    const hourMap = new Map<number, { spend: number; tou: string }>()
-    for (const r of (hourly.data ?? []) as { hour: number; avg_cost: number | string; tou_period: string | null }[]) {
-      hourMap.set(Number(r.hour), { spend: Number(r.avg_cost ?? 0), tou: r.tou_period ?? "off-peak" })
+    // ---- Hours (0..23, zero-filled) from per-minute rows of the anchor day ----
+    const hourSpend = new Array(24).fill(0)
+    const hourTou = new Array<string | null>(24).fill(null)
+    for (const r of (minuteRows.data ?? []) as { minute: string; cost: number | string; tou_period: string | null }[]) {
+      const { date, hour } = chicagoDateHour(new Date(r.minute))
+      if (date !== anchor) continue
+      hourSpend[hour] += Number(r.cost ?? 0)
+      if (!hourTou[hour]) hourTou[hour] = r.tou_period ?? null
     }
     const hours = Array.from({ length: 24 }, (_, h) => ({
       hour: h,
-      spend: hourMap.get(h)?.spend ?? 0,
-      tou: hourMap.get(h)?.tou ?? "off-peak",
+      spend: Math.round(hourSpend[h] * 10000) / 10000,
+      tou: hourTou[h] ?? "off_peak",
     }))
 
-    // ---- Week (each day in the chunk, zero-filled) ----
+    // ---- Daily spend map for the anchor month (energy only) ----
     const dayMap = new Map<string, number>()
-    for (const r of (weekRange.data ?? []) as { day: string; spend: number | string }[]) {
-      dayMap.set(String(r.day), Number(r.spend ?? 0))
+    for (const r of (monthDaysRes.data ?? []) as { day_local: string; cost: number | string }[]) {
+      dayMap.set(String(r.day_local), Number(r.cost ?? 0))
     }
+
+    // ---- Week (each day in the chunk, zero-filled) ----
     const week: { day: string; spend: number }[] = []
     for (let d = weekStartDay; d <= weekEndDay; d++) {
       const key = iso(year, month, d)
-      week.push({ day: key, spend: dayMap.get(key) ?? 0 })
+      week.push({ day: key, spend: Math.round((dayMap.get(key) ?? 0) * 100) / 100 })
     }
 
     // ---- Month (weeks 1..N, zero-filled) ----
     const weekCount = Math.min(Math.ceil(daysInMonth / 7), 5)
-    const monthMap = new Map<number, number>()
-    for (const r of (monthWeeks.data ?? []) as { week: number; cost: number | string }[]) {
-      monthMap.set(Number(r.week), Number(r.cost ?? 0))
+    const weekTotals = new Array(weekCount + 1).fill(0)
+    for (let d = 1; d <= daysInMonth; d++) {
+      const wk = Math.min(Math.ceil(d / 7), 5)
+      weekTotals[wk] += dayMap.get(iso(year, month, d)) ?? 0
     }
-    const month_weeks = Array.from({ length: weekCount }, (_, i) => {
+    const weeks = Array.from({ length: weekCount }, (_, i) => {
       const wk = i + 1
       const startD = (wk - 1) * 7 + 1
       const endD = Math.min(wk * 7, daysInMonth)
@@ -98,14 +154,17 @@ export async function GET(request: Request) {
         week: wk,
         startDay: iso(year, month, startD),
         endDay: iso(year, month, endD),
-        spend: monthMap.get(wk) ?? 0,
+        spend: Math.round(weekTotals[wk] * 100) / 100,
       }
     })
+    const monthTotal = Math.round(weeks.reduce((s, w) => s + w.spend, 0) * 100) / 100
 
-    const monthTotal = month_weeks.reduce((s, w) => s + w.spend, 0)
-
-    const earliestIso = (earliest.data?.[0]?.reading_at as string | undefined) ?? null
-    const availableMonths = buildAvailableMonths(earliestIso, nowCst)
+    // ---- Selectable months from the ledger, newest first ----
+    const availableMonths = ((monthsRes.data ?? []) as { month_local: string }[]).map((r) => {
+      const [y, m] = String(r.month_local).split("-").map(Number)
+      return { year: y, month: m }
+    })
+    if (availableMonths.length === 0) availableMonths.push({ year, month })
 
     return NextResponse.json({
       ok: true,
@@ -116,43 +175,12 @@ export async function GET(request: Request) {
       weekOfMonth,
       hours,
       week,
-      weeks: month_weeks,
-      monthTotal: Math.round(monthTotal * 100) / 100,
+      weeks,
+      monthTotal,
       availableMonths,
     })
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown error"
     return NextResponse.json({ ok: false, error: message }, { status: 500 })
   }
-}
-
-// Inclusive list of { year, month } from the earliest data month to the
-// current Central-time month, newest first.
-function buildAvailableMonths(
-  earliestIso: string | null,
-  nowCst: Date,
-): { year: number; month: number }[] {
-  const endY = nowCst.getUTCFullYear()
-  const endM = nowCst.getUTCMonth() + 1
-
-  let startY = endY
-  let startM = endM
-  if (earliestIso) {
-    const e = new Date(new Date(earliestIso).getTime() - CST_OFFSET_MS)
-    startY = e.getUTCFullYear()
-    startM = e.getUTCMonth() + 1
-  }
-
-  const out: { year: number; month: number }[] = []
-  let y = startY
-  let m = startM
-  while (y < endY || (y === endY && m <= endM)) {
-    out.push({ year: y, month: m })
-    m += 1
-    if (m > 12) {
-      m = 1
-      y += 1
-    }
-  }
-  return out.reverse()
 }
