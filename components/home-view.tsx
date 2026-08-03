@@ -230,7 +230,7 @@ export function HomeView() {
           <p className={`mt-1 text-base font-semibold text-pretty ${humidity.tone}`}>{humidity.label}</p>
         </div>
 
-        {/* Collapsible comfort history: indoor temp, comfort score, happy number */}
+        {/* Collapsible comfort history: return air temp, comfort score, happy number */}
         <button
           type="button"
           onClick={() => setComfortHistoryOpen((v) => !v)}
@@ -720,7 +720,7 @@ function TouLegend() {
 }
 
 // ---- Comfort-over-time chart ----------------------------------------------
-// Three line series on the SAME time axis as the cost chart: indoor temp (°F,
+  // Three line series on the SAME time axis as the cost chart: return air (°F,
 // left axis) plus comfort score and happy number (0–100, right axis). Each
 // series gets a unique color. Daily = today's hours, Weekly = last 7 days,
 // Monthly = current calendar month.
@@ -897,7 +897,7 @@ function ComfortLineSvg({ points }: { points: ComfortPoint[] }) {
       viewBox={`0 0 ${W} ${H}`}
       className="w-full"
       role="img"
-      aria-label="Comfort history line chart: indoor temperature, comfort score, and happy number"
+      aria-label="Comfort history line chart: return air temperature, comfort score, and happy number"
       style={{ height: "auto" }}
     >
       {/* Horizontal gridlines aligned to the score axis */}
@@ -982,7 +982,7 @@ function ComfortLegend() {
     <div className="mt-2 flex flex-wrap items-center justify-center gap-4 text-[10px] text-muted">
       <span className="flex items-center gap-1.5">
         <span className="h-0.5 w-3.5 rounded-full" style={{ background: COMFORT_COLORS.temp }} aria-hidden />
-        Indoor temp (°F)
+        Return air (°F)
       </span>
       <span className="flex items-center gap-1.5">
         <span className="h-0.5 w-3.5 rounded-full" style={{ background: COMFORT_COLORS.comfort }} aria-hidden />
