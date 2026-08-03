@@ -19,6 +19,7 @@ import {
   AlertTriangle,
   History,
   Undo2,
+  MoreHorizontal,
 } from "lucide-react"
 import {
   happyBand,
