@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { runAutomationTick } from "@/lib/automation/engine"
+import { ingestWeather } from "@/lib/weather-ingest"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 30
@@ -36,8 +37,19 @@ export async function POST(request: Request) {
   }
 
   try {
-    const result = await runAutomationTick()
-    return NextResponse.json({ ok: true, ...result })
+    // Run the automation engine and a rolling weather self-heal together. The
+    // weather ingest keeps weather_observations current going forward (and
+    // backfills any recent gap) on the same 5-minute cron, independent of
+    // whether any automation is enabled. A weather failure never fails the tick.
+    const [result, weather] = await Promise.all([
+      runAutomationTick(),
+      ingestWeather().catch((err) => ({
+        ok: false as const,
+        error: err instanceof Error ? err.message : "weather ingest failed",
+      })),
+    ])
+    if (!weather.ok) console.log("[v0] weather ingest (tick) skipped:", weather.error)
+    return NextResponse.json({ ok: true, ...result, weather })
   } catch (err) {
     console.log("[v0] automation tick failed:", err instanceof Error ? err.message : err)
     return NextResponse.json(
