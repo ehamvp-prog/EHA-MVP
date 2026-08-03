@@ -6,7 +6,9 @@ import { DollarSign, Thermometer, Sun, Home as HomeIcon, Smile, RefreshCw } from
 import { ComfortProfilePanel, HappyNumberPanel } from "./comfort-profile"
 import { NestCard } from "./nest-card"
 import { AutomationJournalCard } from "./automation-journal"
+import { SavingsSection } from "./savings-section"
 import { FilterHealthCard } from "./filter-health-card"
+import { chicagoParts } from "@/lib/chicago-time"
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
 
@@ -166,6 +168,9 @@ export function HomeView() {
 
           {/* 4. Automation journal — self-hides until there's history */}
           <AutomationJournalCard />
+
+          {/* 5. Savings — what Elevate did for you (measured), separate from cost */}
+          <SavingsSection />
 
       {/* 2. Cost — the centerpiece */}
       <div className="rounded-2xl border border-border bg-card p-5 shadow-lg shadow-black/40">
@@ -386,11 +391,10 @@ function pad2(n: number) {
 function CostChart() {
   const [mode, setMode] = useState<ChartMode>("daily")
 
-  // "Today" in Central time — the reset target and default anchor.
-  const nowCst = new Date(Date.now() - 6 * 60 * 60 * 1000)
-  const todayY = nowCst.getUTCFullYear()
-  const todayM = nowCst.getUTCMonth() + 1
-  const todayD = nowCst.getUTCDate()
+  // "Today" in America/Chicago — the reset target and default anchor. Uses a
+  // real DST-aware conversion (the ledger data is Chicago-bucketed); the old
+  // fixed -6h offset double-shifted it and was wrong during CDT.
+  const { year: todayY, month: todayM, day: todayD } = chicagoParts()
 
   // One shared calendar anchor drives ALL three tabs. Changing the month or
   // year snaps the day back to the 1st (so "just a month" reads the start of
@@ -782,8 +786,10 @@ function ComfortChart({
       }))
     }
   } else {
-    const nowCst = new Date(Date.now() - 6 * 60 * 60 * 1000)
-    const ym = `${nowCst.getUTCFullYear()}-${String(nowCst.getUTCMonth() + 1).padStart(2, "0")}`
+    // Current month in America/Chicago (DST-aware), matching the Chicago-bucketed
+    // day keys from the API — the old fixed -6h offset double-shifted this.
+    const { year, month } = chicagoParts()
+    const ym = `${year}-${String(month).padStart(2, "0")}`
     const monthDays = days.filter((d) => d.day.startsWith(ym))
     if (monthDays.length < 2) {
       fallback = "Still collecting — check back in a day or two."

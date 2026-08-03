@@ -11,12 +11,11 @@
 import { NextResponse } from "next/server"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { SITE_ID } from "@/lib/compute-reading"
-import { computeHappyNumber, type ComfortProfile } from "@/lib/comfort/happy-number"
+import { type ComfortProfile } from "@/lib/comfort/happy-number"
 import { comfortFromConditions } from "@/lib/comfort/ring"
+import { chicagoMonthIndex } from "@/lib/chicago-time"
 
 export const dynamic = "force-dynamic"
-
-const CST_OFFSET_MS = 6 * 60 * 60 * 1000
 
 // Sensible defaults when no comfort profile has been saved yet — matches the
 // app's standing defaults so derived scores line up with the live ring.
@@ -32,11 +31,7 @@ const DEFAULT_PROFILE: ComfortProfile = {
 // Month (0–11) in Central time for a given YYYY-MM-DD day key.
 function monthOfDay(dayIso: string): number {
   const m = Number(dayIso.slice(5, 7))
-  return Number.isFinite(m) ? m - 1 : new Date(Date.now() - CST_OFFSET_MS).getUTCMonth()
-}
-
-function monthCstNow(): number {
-  return new Date(Date.now() - CST_OFFSET_MS).getUTCMonth()
+  return Number.isFinite(m) ? m - 1 : chicagoMonthIndex()
 }
 
 type DayRow = { day: string; avg_temp_f: number | string | null; avg_rh: number | string | null }
@@ -72,41 +67,37 @@ export async function GET() {
     if (daily.error) throw daily.error
     if (hourly.error) throw hourly.error
 
+    // Happy Number is a STORED property of the comfort profile — the pure
+    // comfort of the user's preferred conditions. Compute it ONCE (exactly as
+    // the Comfort Profile settings screen does: comfortFromConditions at the
+    // current month) and draw it as a flat reference line across every bucket.
+    // It never comes from telemetry, so it can't shadow the Comfort Score.
+    const nowMonth = chicagoMonthIndex()
+    const happyConstant = comfortFromConditions(
+      profile.preferred_temp_f,
+      profile.preferred_rh,
+      profile,
+      nowMonth,
+    )
+
     const days = ((daily.data ?? []) as DayRow[])
       .map((r) => {
         const tempF = r.avg_temp_f == null ? null : Number(r.avg_temp_f)
         const rh = r.avg_rh == null ? null : Number(r.avg_rh)
         if (tempF == null || rh == null) return null
-        const month = monthOfDay(String(r.day))
-        const comfort = comfortFromConditions(tempF, rh, profile, month)
-        // Happy Number is the user's TARGET comfort (their preferred setpoint),
-        // not a per-reading measurement. It renders as a flat reference line and
-        // only shifts when the profile changes (sliders / captured anchor).
-        const happy = computeHappyNumber({
-          liveTempF: profile.preferred_temp_f,
-          liveRh: profile.preferred_rh,
-          profile,
-          monthCst: month,
-        }).happy
-        return { day: String(r.day), tempF: Math.round(tempF * 10) / 10, comfort, happy }
+        // Comfort Score stays per-day (its clothing assumption is seasonal).
+        const comfort = comfortFromConditions(tempF, rh, profile, monthOfDay(String(r.day)))
+        return { day: String(r.day), tempF: Math.round(tempF * 10) / 10, comfort, happy: happyConstant }
       })
       .filter((d): d is { day: string; tempF: number; comfort: number; happy: number } => d !== null)
 
-    const month = monthCstNow()
     const hours = ((hourly.data ?? []) as HourRow[])
       .map((r) => {
         const tempF = r.avg_temp_f == null ? null : Number(r.avg_temp_f)
         const rh = r.avg_rh == null ? null : Number(r.avg_rh)
         if (tempF == null || rh == null) return null
-        const comfort = comfortFromConditions(tempF, rh, profile, month)
-        // Target comfort (flat reference line) — from the profile, not telemetry.
-        const happy = computeHappyNumber({
-          liveTempF: profile.preferred_temp_f,
-          liveRh: profile.preferred_rh,
-          profile,
-          monthCst: month,
-        }).happy
-        return { hour: Number(r.hour), tempF: Math.round(tempF * 10) / 10, comfort, happy }
+        const comfort = comfortFromConditions(tempF, rh, profile, nowMonth)
+        return { hour: Number(r.hour), tempF: Math.round(tempF * 10) / 10, comfort, happy: happyConstant }
       })
       .filter((h): h is { hour: number; tempF: number; comfort: number; happy: number } => h !== null)
 

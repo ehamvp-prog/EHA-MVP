@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import useSWR from "swr"
 import {
   History,
@@ -9,6 +9,7 @@ import {
   ShieldCheck,
   Lightbulb,
   TrendingDown,
+  TrendingUp,
   ChevronLeft,
   ChevronRight,
   ChevronDown,
@@ -29,8 +30,29 @@ type JournalEntry = {
   nest_confirmed: boolean | null
   before_state: { comfort_score?: number | null } | null
   after_state: { comfort_score?: number | null } | null
-  est_savings_usd: number | null
-  est_comfort_delta: number | null
+  // NOTE: est_savings_usd is deprecated (hardcoded formula) and intentionally
+  // NOT read here — measured savings come from /api/savings/events instead.
+}
+
+// Per-action measured effect, keyed by id === automation_journal.id.
+type SavingsEvent = {
+  id: string
+  occurred_at: string
+  action_type: string
+  measured_savings_usd: number | null
+  confidence: string
+  limiting_factors: string[]
+  explanation: string | null
+}
+
+type SavingsSummary = {
+  ok: boolean
+  month: string
+  net_savings_usd: number
+  gross_savings_usd: number
+  costs_usd: number
+  actions: number
+  unmeasurable_actions: number
 }
 
 // A row in the rendered journal: either a real automated action, or a
@@ -79,14 +101,31 @@ export function AutomationJournalCard() {
     fetcher,
     { refreshInterval: 60000 },
   )
+  // Measured savings for the current month + per-action measured effects,
+  // both derived from real power data (not the deprecated est_savings_usd).
+  const { data: summary } = useSWR<SavingsSummary>("/api/savings/summary", fetcher, {
+    refreshInterval: 60000,
+  })
+  const { data: eventsData } = useSWR<{ ok: boolean; events: SavingsEvent[] }>(
+    "/api/savings/events",
+    fetcher,
+    { refreshInterval: 60000 },
+  )
   const [page, setPage] = useState(0)
   // Collapsed by default — expands only when the user opens it.
   const [collapsed, setCollapsed] = useState(true)
   const entries = data?.entries ?? []
 
+  const eventById = useMemo(() => {
+    const m = new Map<string, SavingsEvent>()
+    for (const ev of eventsData?.events ?? []) m.set(ev.id, ev)
+    return m
+  }, [eventsData])
+
   if (entries.length === 0) return null
 
-  const totalSavings = entries.reduce((sum, e) => sum + (e.est_savings_usd ?? 0), 0)
+  const measuredNet = summary?.net_savings_usd ?? 0
+  const hasMeasured = !!summary && summary.actions > 0
 
   // Collapse noisy consecutive "check-in" rows into a single "System steady"
   // marker, so the journal reads as a list of things that actually happened.
@@ -119,10 +158,18 @@ export function AutomationJournalCard() {
             className={`h-4 w-4 shrink-0 text-muted transition-transform ${collapsed ? "" : "rotate-180"}`}
           />
         </button>
-        {totalSavings > 0 ? (
-          <div className="shrink-0 rounded-xl border border-ok/30 bg-ok/10 px-3 py-1.5 text-right">
-            <p className="text-[10px] uppercase tracking-wide text-muted">Saved</p>
-            <p className="text-sm font-bold tabular-nums text-ok">${totalSavings.toFixed(2)}</p>
+        {hasMeasured ? (
+          <div
+            className={`shrink-0 rounded-xl border px-3 py-1.5 text-right ${
+              measuredNet < 0 ? "border-warn/30 bg-warn/10" : "border-ok/30 bg-ok/10"
+            }`}
+          >
+            <p className="text-[10px] uppercase tracking-wide text-muted">Measured savings</p>
+            <p
+              className={`text-sm font-bold tabular-nums ${measuredNet < 0 ? "text-warn" : "text-ok"}`}
+            >
+              {measuredNet < 0 ? "-" : ""}${Math.abs(measuredNet).toFixed(2)}
+            </p>
           </div>
         ) : null}
       </div>
@@ -134,7 +181,7 @@ export function AutomationJournalCard() {
               item.kind === "steady" ? (
                 <SteadyRow key={item.id} item={item} />
               ) : (
-                <JournalRow key={item.entry.id} entry={item.entry} />
+                <JournalRow key={item.entry.id} entry={item.entry} event={eventById.get(item.entry.id)} />
               ),
             )}
           </ul>
@@ -173,7 +220,7 @@ export function AutomationJournalCard() {
   )
 }
 
-function JournalRow({ entry }: { entry: JournalEntry }) {
+function JournalRow({ entry, event }: { entry: JournalEntry; event?: SavingsEvent }) {
   const meta = actionMeta(entry.action_type)
   const Icon = meta.icon
   const before = entry.before_state?.comfort_score
@@ -193,11 +240,7 @@ function JournalRow({ entry }: { entry: JournalEntry }) {
           <p className="mt-0.5 text-xs text-muted-foreground text-pretty">{entry.trigger_reason}</p>
         ) : null}
         <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
-          {entry.est_savings_usd != null && entry.est_savings_usd > 0 ? (
-            <span className="flex items-center gap-1 text-ok">
-              <TrendingDown className="h-3 w-3" /> Saved ${entry.est_savings_usd.toFixed(2)}
-            </span>
-          ) : null}
+          <SavingsEffect event={event} />
           {before != null && after != null ? (
             <span className="text-muted">
               Comfort {before} → {after}
@@ -207,8 +250,55 @@ function JournalRow({ entry }: { entry: JournalEntry }) {
             <ConfirmBadge confirmed={entry.nest_confirmed} hadCommand={entry.command_sent != null} />
           )}
         </div>
+
+        {/* Plain-language explanation of what was measured. */}
+        {event?.explanation ? (
+          <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground text-pretty">
+            {event.explanation}
+          </p>
+        ) : null}
+
+        {/* Honest notes on what limited the result. */}
+        {event && event.limiting_factors.length > 0 ? (
+          <ul className="mt-1 flex flex-col gap-0.5">
+            {event.limiting_factors.map((lf, i) => (
+              <li key={i} className="flex items-start gap-1.5 text-[11px] text-muted">
+                <span aria-hidden className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-muted" />
+                <span className="text-pretty">{lf}</span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
       </div>
     </li>
+  )
+}
+
+// The measured effect chip. Confidence governs how the number is shown — the
+// whole point of the rebuild is to read honestly rather than print "$0.00".
+function SavingsEffect({ event }: { event?: SavingsEvent }) {
+  if (!event) return null
+  const { confidence, measured_savings_usd: amt } = event
+
+  if (confidence === "none") return <span className="text-muted">No measurable effect</span>
+  if (confidence === "insufficient_data")
+    return <span className="text-muted">Not enough data to measure</span>
+  if (amt == null) return <span className="text-muted">No measurable effect</span>
+
+  const soft = confidence === "low" // low confidence → visually softened
+
+  // Negative = pre-cooling spent money at off-peak to avoid on-peak. Honest cost.
+  if (amt < 0) {
+    return (
+      <span className={`flex items-center gap-1 ${soft ? "text-muted" : "text-muted-foreground"}`}>
+        <TrendingUp className="h-3 w-3" /> Cost ${Math.abs(amt).toFixed(2)}
+      </span>
+    )
+  }
+  return (
+    <span className={`flex items-center gap-1 ${soft ? "text-ok/60" : "text-ok"}`}>
+      <TrendingDown className="h-3 w-3" /> Saved ${amt.toFixed(2)}
+    </span>
   )
 }
 
