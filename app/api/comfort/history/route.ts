@@ -2,9 +2,10 @@
 // GET /api/comfort/history
 // Read-only. Returns a time series of INDOOR TEMPERATURE, COMFORT SCORE,
 // and HAPPY NUMBER, bucketed by hour (today) and day (last ~31 days),
-// mirroring /api/cost/history. Comfort score and happy number are derived
-// per bucket from the stored indoor temp/humidity using the SAME comfort
-// math the live ring uses (nothing new invented here). Changes no data.
+// mirroring /api/cost/history. COMFORT SCORE is derived per bucket from the
+// stored indoor temp/humidity (the same math the live ring uses). HAPPY NUMBER
+// is the user's TARGET comfort computed from their saved profile preferences —
+// a flat reference line, never derived from telemetry. Changes no data.
 // =====================================================================
 
 import { NextResponse } from "next/server"
@@ -78,7 +79,15 @@ export async function GET() {
         if (tempF == null || rh == null) return null
         const month = monthOfDay(String(r.day))
         const comfort = comfortFromConditions(tempF, rh, profile, month)
-        const happy = computeHappyNumber({ liveTempF: tempF, liveRh: rh, profile, monthCst: month }).happy
+        // Happy Number is the user's TARGET comfort (their preferred setpoint),
+        // not a per-reading measurement. It renders as a flat reference line and
+        // only shifts when the profile changes (sliders / captured anchor).
+        const happy = computeHappyNumber({
+          liveTempF: profile.preferred_temp_f,
+          liveRh: profile.preferred_rh,
+          profile,
+          monthCst: month,
+        }).happy
         return { day: String(r.day), tempF: Math.round(tempF * 10) / 10, comfort, happy }
       })
       .filter((d): d is { day: string; tempF: number; comfort: number; happy: number } => d !== null)
@@ -90,7 +99,13 @@ export async function GET() {
         const rh = r.avg_rh == null ? null : Number(r.avg_rh)
         if (tempF == null || rh == null) return null
         const comfort = comfortFromConditions(tempF, rh, profile, month)
-        const happy = computeHappyNumber({ liveTempF: tempF, liveRh: rh, profile, monthCst: month }).happy
+        // Target comfort (flat reference line) — from the profile, not telemetry.
+        const happy = computeHappyNumber({
+          liveTempF: profile.preferred_temp_f,
+          liveRh: profile.preferred_rh,
+          profile,
+          monthCst: month,
+        }).happy
         return { hour: Number(r.hour), tempF: Math.round(tempF * 10) / 10, comfort, happy }
       })
       .filter((h): h is { hour: number; tempF: number; comfort: number; happy: number } => h !== null)
