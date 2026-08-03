@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from "react"
 import useSWR from "swr"
-import { Thermometer, Snowflake, Flame, RefreshCw, Power, Fan, Minus, Plus, Wifi, Lock, Unlock } from "lucide-react"
+import { Thermometer, Snowflake, Flame, RefreshCw, Power, Fan, Minus, Plus, Wifi, Lock, Unlock, MoreHorizontal } from "lucide-react"
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
 
@@ -63,6 +63,9 @@ export function NestCard() {
   })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Collapsed by default: the card shows only the two readings until expanded.
+  const [expanded, setExpanded] = useState(false)
 
   // Soft lock: controls are read-only until the code is entered.
   const [unlocked, setUnlocked] = useState(false)
@@ -233,10 +236,21 @@ export function NestCard() {
 
   return (
     <div className="rounded-2xl border border-border bg-card p-5 shadow-lg shadow-black/40">
-      <SectionHeader icon={<Thermometer className="h-5 w-5 text-primary" />} title="Your thermostat" />
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <SectionHeader icon={<Thermometer className="h-5 w-5 text-primary" />} title="Your thermostat" />
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          aria-label={expanded ? "Hide thermostat controls" : "Show thermostat controls"}
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-border bg-elevated text-muted transition-colors hover:text-foreground"
+        >
+          <MoreHorizontal className="h-5 w-5" />
+        </button>
+      </div>
 
-      {/* Current readings */}
-      <div className="mb-4 grid grid-cols-2 gap-3">
+      {/* Current readings — always visible */}
+      <div className="grid grid-cols-2 gap-3">
         <div className="rounded-xl border border-border bg-elevated p-4 text-center">
           <p className="text-xs uppercase tracking-wide text-muted">Indoor temp</p>
           <p className="mt-1 text-3xl font-semibold text-foreground tabular-nums">
@@ -251,6 +265,8 @@ export function NestCard() {
         </div>
       </div>
 
+      {!expanded ? null : (
+        <div className="mt-4">
       {/* Status + active setpoint */}
       <div className="mb-4 flex items-center justify-between rounded-xl border border-border bg-elevated px-4 py-3">
         <span className={`text-sm font-medium ${status.tone}`}>{status.label}</span>
@@ -416,6 +432,8 @@ export function NestCard() {
       </div>
 
       {error ? <p className="mt-3 text-sm text-bad">{error}</p> : null}
+        </div>
+      )}
     </div>
   )
 }
