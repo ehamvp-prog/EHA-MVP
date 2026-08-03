@@ -71,6 +71,56 @@ function confidenceFromAge(ageMin: number | null): "high" | "medium" | "low" {
   return "low"
 }
 
+export type HourlyObs = {
+  hour_utc: string // ISO, truncated to the hour
+  outdoor_temp_f: number | null
+  outdoor_rh: number | null
+  samples: number
+}
+
+// Fetch dense, gap-free historical hourly weather from Open-Meteo (free, no key).
+// Unlike the NWS observations endpoint — which only retains ~7 days — Open-Meteo
+// serves complete hourly temperature + humidity for the whole requested range,
+// so it is the source used to backfill and self-heal outdoor_hourly history.
+// Dates are inclusive YYYY-MM-DD in UTC. Returns hours ascending.
+export async function getOpenMeteoHourly(
+  lat: number,
+  lon: number,
+  startDate: string,
+  endDate: string,
+): Promise<{ ok: boolean; error?: string; hours: HourlyObs[] }> {
+  try {
+    const url =
+      `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+      `&hourly=temperature_2m,relative_humidity_2m&temperature_unit=fahrenheit` +
+      `&timezone=UTC&start_date=${startDate}&end_date=${endDate}`
+    const res = await fetch(url, { cache: "no-store" })
+    if (!res.ok) return { ok: false, error: `Open-Meteo failed (${res.status})`, hours: [] }
+    const json = await res.json()
+    const times: string[] = json?.hourly?.time ?? []
+    const temps: (number | null)[] = json?.hourly?.temperature_2m ?? []
+    const rhs: (number | null)[] = json?.hourly?.relative_humidity_2m ?? []
+
+    const hours: HourlyObs[] = []
+    for (let i = 0; i < times.length; i++) {
+      const t = temps[i]
+      const rh = rhs[i]
+      if (t == null && rh == null) continue
+      // Open-Meteo hourly timestamps are top-of-hour UTC ("YYYY-MM-DDTHH:MM").
+      const hour_utc = new Date(`${times[i]}:00Z`).toISOString()
+      hours.push({
+        hour_utc,
+        outdoor_temp_f: t != null ? Math.round(t * 10) / 10 : null,
+        outdoor_rh: rh != null ? Math.round(rh * 10) / 10 : null,
+        samples: 1, // modeled reanalysis: one authoritative value per hour
+      })
+    }
+    return { ok: true, hours }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Open-Meteo fetch failed", hours: [] }
+  }
+}
+
 // Given lat/lon, find the nearest NWS station and read the latest observation.
 export async function getWeatherByLatLon(lat: number, lon: number): Promise<WeatherResult> {
   const empty: WeatherResult = {
