@@ -94,7 +94,12 @@ export async function GET(request: Request) {
         .select("minute, cost, tou_period")
         .eq("site_id", SITE_ID)
         .gte("minute", minutesFrom)
-        .lt("minute", minutesTo),
+        .lt("minute", minutesTo)
+        // The 36h window holds up to ~2,160 one-minute rows. Without an explicit
+        // order + high limit, PostgREST's default 1,000-row cap silently drops
+        // rows — which zeroed out early-morning hours on any full day.
+        .order("minute", { ascending: true })
+        .limit(5000),
       supabase
         .from("energy_daily")
         .select("day_local, cost")

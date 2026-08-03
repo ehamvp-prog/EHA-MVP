@@ -17,9 +17,9 @@ const fetcher = (url: string) => fetch(url).then((r) => r.json())
 type SegPoint = {
   day: string
   seg: number
-  avgEer: number | null
-  minEer: number | null
-  maxEer: number | null
+  avgSeer2: number | null
+  minSeer2: number | null
+  maxSeer2: number | null
   capacity: number | null
 }
 type Resp = {
@@ -30,11 +30,12 @@ type Resp = {
   availableMonths: AvailableMonth[]
 }
 
-// NEW efficiency history — measured, not asserted. Plots live EER (min→max band
-// around the average) against the unit's rated SEER2 reference line, so you can
-// see efficiency sag through the heat of the day and still beat nameplate.
-// Replaces the static "Running great" text card. Same shell chrome as the
-// other charts: Daily/Weekly/Monthly, historical search, day drill-down.
+// NEW efficiency history — measured, not asserted. Plots measured SEER2 (live
+// EER converted on a SEER2-equivalent basis, min→max band around the average)
+// against the unit's rated SEER2 reference line — an apples-to-apples SEER2
+// comparison, so you can see efficiency sag through the heat of the day and
+// still beat nameplate. Replaces the static "Running great" text card. Same
+// shell chrome as the other charts: Daily/Weekly/Monthly, search, drill-down.
 export function EfficiencyChart() {
   const range = useChartRange()
   const { data } = useSWR<Resp>(
@@ -47,13 +48,13 @@ export function EfficiencyChart() {
   const points: BandPoint[] = (data?.points ?? []).map((p) => ({
     day: p.day,
     seg: p.seg,
-    avg: p.avgEer,
-    min: p.minEer,
-    max: p.maxEer,
+    avg: p.avgSeer2,
+    min: p.minSeer2,
+    max: p.maxSeer2,
   }))
 
-  const eers = (data?.points ?? []).map((p) => p.avgEer).filter((v): v is number => v != null)
-  const avgEer = eers.length ? eers.reduce((a, b) => a + b, 0) / eers.length : null
+  const seer2s = (data?.points ?? []).map((p) => p.avgSeer2).filter((v): v is number => v != null)
+  const avgSeer2 = seer2s.length ? seer2s.reduce((a, b) => a + b, 0) / seer2s.length : null
 
   const title =
     range.view === "daily"
@@ -68,10 +69,10 @@ export function EfficiencyChart() {
       title="Efficiency history"
       subtitle="Measured performance, minute by minute"
       badge={
-        avgEer != null ? (
+        avgSeer2 != null ? (
           <div className="rounded-xl border border-warn/30 bg-warn/10 px-3 py-1.5 text-right">
-            <p className="text-[10px] uppercase tracking-wide text-muted">Avg EER</p>
-            <p className="text-sm font-bold tabular-nums text-warn">{avgEer.toFixed(1)}</p>
+            <p className="text-[10px] uppercase tracking-wide text-muted">Avg SEER2</p>
+            <p className="text-sm font-bold tabular-nums text-warn">{avgSeer2.toFixed(1)}</p>
           </div>
         ) : null
       }
@@ -103,10 +104,11 @@ export function EfficiencyChart() {
                 },
               ]}
               onDrillDay={range.drillDown}
-              ariaLabel="Measured EER over time against rated SEER2"
+              ariaLabel="Measured SEER2 over time against rated SEER2"
             />
             <p className="mt-2 text-center text-xs text-muted">
-              Higher is better. Band spans the range within each slot; dashed line is the unit&apos;s rated efficiency.
+              Measured SEER2 — higher is better. Band spans the range within each slot; dashed line is the unit&apos;s
+              rated SEER2.
               {range.view !== "daily" ? " Tap a day to zoom in." : ""}
             </p>
           </>

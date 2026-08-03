@@ -12,6 +12,7 @@ import { NextResponse } from "next/server"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { SITE_ID } from "@/lib/compute-reading"
 import { chicagoParts, chicagoChartWindow, type ChartView } from "@/lib/chicago-time"
+import { seer2ConversionFactor } from "@/lib/engine/seer2"
 
 export const dynamic = "force-dynamic"
 
@@ -52,7 +53,7 @@ export async function GET(request: Request) {
 
     const { fromISO, toISO, segments, days } = chicagoChartWindow(view, year, month, day)
 
-    const [segRes, monthsRes] = await Promise.all([
+    const [segRes, monthsRes, profRes] = await Promise.all([
       supabase.rpc("efficiency_segments", {
         p_site_id: SITE_ID,
         p_from: fromISO,
@@ -64,16 +65,32 @@ export async function GET(request: Request) {
         .select("month_local")
         .eq("site_id", SITE_ID)
         .order("month_local", { ascending: false }),
+      // Equipment-class-aware factor that converts live EER → measured SEER2,
+      // so the band is directly comparable to the rated SEER2 nameplate line.
+      supabase
+        .from("system_profile")
+        .select("equipment_class, seer2_conversion_factor")
+        .eq("site_id", SITE_ID)
+        .maybeSingle(),
     ])
     if (segRes.error) throw segRes.error
+
+    const { factor } = seer2ConversionFactor(
+      profRes.data?.equipment_class ?? null,
+      profRes.data?.seer2_conversion_factor ?? null,
+    )
+    // EER → measured SEER2 (rounded to 1 decimal after conversion).
+    const toSeer2 = (v: number | string | null): number | null =>
+      v == null ? null : Math.round(Number(v) * factor * 10) / 10
 
     const rows = (segRes.data ?? []) as SegRow[]
     const points = rows.map((r) => ({
       day: String(r.day_local),
       seg: Number(r.seg_index),
-      avgEer: r1(r.avg_eer),
-      minEer: r1(r.min_eer),
-      maxEer: r1(r.max_eer),
+      // Measured SEER2 (EER × conversion factor) so it lines up with rated SEER2.
+      avgSeer2: toSeer2(r.avg_eer),
+      minSeer2: toSeer2(r.min_eer),
+      maxSeer2: toSeer2(r.max_eer),
       capacity: r0(r.avg_capacity_btuh),
       watts: r0(r.avg_watts),
       coolingMinutes: Number(r.cooling_minutes ?? 0),
