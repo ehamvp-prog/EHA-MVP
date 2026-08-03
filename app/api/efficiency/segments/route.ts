@@ -53,7 +53,7 @@ export async function GET(request: Request) {
 
     const { fromISO, toISO, segments, days } = chicagoChartWindow(view, year, month, day)
 
-    const [segRes, monthsRes, profRes] = await Promise.all([
+    const [segRes, monthsRes, profRes, outdoorRes] = await Promise.all([
       supabase.rpc("efficiency_segments", {
         p_site_id: SITE_ID,
         p_from: fromISO,
@@ -72,8 +72,22 @@ export async function GET(request: Request) {
         .select("equipment_class, seer2_conversion_factor")
         .eq("site_id", SITE_ID)
         .maybeSingle(),
+      // Outdoor temperature on the SAME Chicago segment scheme, so we can
+      // overlay it aligned to each efficiency bucket by (day_local, seg_index).
+      supabase.rpc("outdoor_segments", {
+        p_from: fromISO,
+        p_to: toISO,
+        p_segments: segments,
+      }),
     ])
     if (segRes.error) throw segRes.error
+
+    // Lookup: "day|seg" -> avg outdoor °F. Sparse — many buckets will be absent,
+    // which the chart draws as gaps in the outdoor line.
+    const outdoorByBucket = new Map<string, number>()
+    for (const o of (outdoorRes.data ?? []) as { day_local: string; seg_index: number; avg_temp_f: number | string | null }[]) {
+      if (o.avg_temp_f != null) outdoorByBucket.set(`${o.day_local}|${o.seg_index}`, Number(o.avg_temp_f))
+    }
 
     const { factor } = seer2ConversionFactor(
       profRes.data?.equipment_class ?? null,
@@ -94,6 +108,8 @@ export async function GET(request: Request) {
       capacity: r0(r.avg_capacity_btuh),
       watts: r0(r.avg_watts),
       coolingMinutes: Number(r.cooling_minutes ?? 0),
+      // Aligned outdoor temperature for this bucket (null where no weather data).
+      outdoorTempF: outdoorByBucket.get(`${String(r.day_local)}|${Number(r.seg_index)}`) ?? null,
     }))
 
     // Nameplate reference line (constant across the unit).

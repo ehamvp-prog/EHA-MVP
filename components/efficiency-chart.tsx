@@ -21,6 +21,7 @@ type SegPoint = {
   minSeer2: number | null
   maxSeer2: number | null
   capacity: number | null
+  outdoorTempF: number | null
 }
 type Resp = {
   ok: boolean
@@ -55,6 +56,16 @@ export function EfficiencyChart() {
 
   const seer2s = (data?.points ?? []).map((p) => p.avgSeer2).filter((v): v is number => v != null)
   const avgSeer2 = seer2s.length ? seer2s.reduce((a, b) => a + b, 0) / seer2s.length : null
+
+  // Outdoor temperature overlay (right axis, °F). Sparse weather data → nulls
+  // become gaps in the line. Domain is padded to the actual °F range so the
+  // overlay reads clearly against the SEER2 band on the left.
+  const outdoorValues = (data?.points ?? []).map((p) => p.outdoorTempF)
+  const oats = outdoorValues.filter((v): v is number => v != null)
+  const hasOutdoor = oats.length > 0
+  const oatDomain: [number, number] = hasOutdoor
+    ? [Math.floor((Math.min(...oats) - 3) / 5) * 5, Math.ceil((Math.max(...oats) + 3) / 5) * 5]
+    : [60, 100]
 
   const title =
     range.view === "daily"
@@ -103,12 +114,36 @@ export function EfficiencyChart() {
                   color: "var(--color-muted)",
                 },
               ]}
+              rightSeries={
+                hasOutdoor
+                  ? [
+                      {
+                        values: outdoorValues,
+                        color: "var(--color-accent)",
+                        label: "Outdoor °F",
+                      },
+                    ]
+                  : []
+              }
+              rightDomain={oatDomain}
+              rightUnit="°"
               onDrillDay={range.drillDown}
-              ariaLabel="Measured SEER2 over time against rated SEER2"
+              ariaLabel="Measured SEER2 over time against rated SEER2, with outdoor temperature"
             />
-            <p className="mt-2 text-center text-xs text-muted">
+            {hasOutdoor ? (
+              <div className="mt-2 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[10px] text-muted">
+                <span className="flex items-center gap-1.5">
+                  <span className="h-2 w-3 rounded-sm bg-warn/40" aria-hidden /> Measured SEER2 (left)
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="h-0.5 w-3 rounded-sm bg-accent" aria-hidden /> Outdoor temp (right, °F)
+                </span>
+              </div>
+            ) : null}
+            <p className="mt-1 text-center text-xs text-muted">
               Measured SEER2 — higher is better. Band spans the range within each slot; dashed line is the unit&apos;s
               rated SEER2.
+              {hasOutdoor ? " Blue line is outdoor temperature — efficiency dips as it gets hotter." : ""}
               {range.view !== "daily" ? " Tap a day to zoom in." : ""}
             </p>
           </>
