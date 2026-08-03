@@ -269,9 +269,21 @@ export type BandPoint = {
 
 export type RefLine = { value: number; label: string; color: string; dashed?: boolean }
 
+// A series plotted on the SECONDARY (right) axis — e.g. 0–100 comfort scores
+// drawn alongside a °F temperature band. `values` align to `points` by index.
+export type RightSeries = {
+  values: (number | null)[]
+  color: string
+  label: string
+  step?: boolean // step interpolation (Happy Number holds flat between captures)
+  dashed?: boolean
+}
+
 // Draws a shaded min→max band with the avg line on top. Optional flat/reference
-// lines (e.g. Happy Number, rated SEER2). In weekly/monthly views each day is a
-// tappable region that drills down. Pure SVG, token-driven colors.
+// lines (e.g. rated SEER2) and optional right-axis series (e.g. comfort scores)
+// so temperature (left, °F) and scores (right, 0–100) can share one chart
+// honestly. In weekly/monthly views each day is a full-height tappable region
+// that drills down. Pure SVG, token-driven colors.
 export function BandLineChart({
   points,
   view,
@@ -280,6 +292,9 @@ export function BandLineChart({
   bandColor,
   lineColor,
   refLines = [],
+  rightSeries = [],
+  rightDomain = [0, 100],
+  rightUnit = "",
   onDrillDay,
   ariaLabel,
 }: {
@@ -290,6 +305,9 @@ export function BandLineChart({
   bandColor: string
   lineColor: string
   refLines?: RefLine[]
+  rightSeries?: RightSeries[]
+  rightDomain?: [number, number]
+  rightUnit?: string
   onDrillDay?: (day: string) => void
   ariaLabel: string
 }) {
@@ -302,10 +320,11 @@ export function BandLineChart({
     )
   }
 
+  const hasRight = rightSeries.length > 0
   const W = 340
   const H = 200
   const ml = 34
-  const mr = 8
+  const mr = hasRight ? 30 : 8 // room for the right (score) axis labels
   const mt = 12
   const mb = 24
   const plotX0 = ml
@@ -314,6 +333,11 @@ export function BandLineChart({
   const plotY0 = mt
   const plotY1 = H - mb
   const plotH = plotY1 - plotY0
+
+  // Right (secondary) axis mapping — scores live here, NOT in the left domain.
+  const [rd0, rd1] = rightDomain
+  const rSpan = rd1 - rd0 || 1
+  const yR = (v: number) => plotY1 - ((v - rd0) / rSpan) * plotH
 
   const allVals: number[] = []
   for (const p of points) {
@@ -368,6 +392,14 @@ export function BandLineChart({
   })
   const canDrill = view !== "daily" && !!onDrillDay
 
+  // Full-width horizontal bounds of a day group's column (used by both the
+  // x-axis label position and the full-height tap target).
+  const dayBounds = (g: { startI: number; endI: number }): [number, number] => {
+    const gx0 = x(g.startI) - (g.startI === 0 ? 0 : (x(g.startI) - x(g.startI - 1)) / 2)
+    const gx1 = x(g.endI) + (g.endI === n - 1 ? 0 : (x(g.endI + 1) - x(g.endI)) / 2)
+    return [gx0, gx1]
+  }
+
   const ticks = [lo + span * 0.05, (lo + hi) / 2, hi - span * 0.05]
 
   return (
@@ -382,31 +414,21 @@ export function BandLineChart({
         </g>
       ))}
 
-      {/* day separators + labels (+ drill regions) */}
+      {/* day x-axis labels (drill hit-targets are rendered last, on top) */}
       {view !== "daily" &&
         dayGroups.map((g) => {
-          const gx0 = x(g.startI) - (g.startI === 0 ? 0 : (x(g.startI) - x(g.startI - 1)) / 2)
-          const gx1 = x(g.endI) + (g.endI === n - 1 ? 0 : (x(g.endI + 1) - x(g.endI)) / 2)
-          const label = g.day.slice(8, 10)
+          const [gx0, gx1] = dayBounds(g)
           return (
-            <g key={g.day}>
-              {canDrill ? (
-                <rect
-                  x={gx0}
-                  y={plotY0}
-                  width={Math.max(gx1 - gx0, 1)}
-                  height={plotH}
-                  fill="transparent"
-                  className="cursor-pointer"
-                  onClick={() => onDrillDay!(g.day)}
-                >
-                  <title>{`Open ${g.day}`}</title>
-                </rect>
-              ) : null}
-              <text x={(gx0 + gx1) / 2} y={H - 8} textAnchor="middle" fontSize={9} fill="var(--color-muted)">
-                {label}
-              </text>
-            </g>
+            <text
+              key={g.day}
+              x={(gx0 + gx1) / 2}
+              y={H - 8}
+              textAnchor="middle"
+              fontSize={9}
+              fill="var(--color-muted)"
+            >
+              {g.day.slice(8, 10)}
+            </text>
           )
         })}
 
@@ -444,7 +466,7 @@ export function BandLineChart({
       {/* avg line */}
       <path d={avgPath} fill="none" stroke={lineColor} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
 
-      {/* endpoint value */}
+      {/* endpoint value (left axis) */}
       {(() => {
         const lastIdx = [...points].map((p, i) => (p.avg != null ? i : -1)).filter((i) => i >= 0).pop()
         if (lastIdx == null) return null
@@ -463,6 +485,69 @@ export function BandLineChart({
           </text>
         )
       })()}
+
+      {/* right (score) axis ticks + series */}
+      {hasRight ? (
+        <>
+          {[rd0, (rd0 + rd1) / 2, rd1].map((t, i) => (
+            <text key={`r${i}`} x={plotX1 + 4} y={yR(t) + 3} textAnchor="start" fontSize={9} fill="var(--color-muted)">
+              {Math.round(t)}
+              {rightUnit}
+            </text>
+          ))}
+          {rightSeries.map((s, si) => {
+            // Break the path on nulls; step = hold flat then jump (learning steps).
+            const segsR: string[] = []
+            let cur: string[] = []
+            let prev: number | null = null
+            s.values.forEach((v, i) => {
+              if (v == null) {
+                if (cur.length) segsR.push(`M ${cur.join(" L ")}`)
+                cur = []
+                prev = null
+                return
+              }
+              if (s.step && prev != null) cur.push(`${x(i)},${yR(prev)}`) // horizontal hold
+              cur.push(`${x(i)},${yR(v)}`)
+              prev = v
+            })
+            if (cur.length) segsR.push(`M ${cur.join(" L ")}`)
+            return (
+              <path
+                key={`rs${si}`}
+                d={segsR.join(" ")}
+                fill="none"
+                stroke={s.color}
+                strokeWidth={2}
+                strokeLinejoin="round"
+                strokeLinecap="round"
+                strokeDasharray={s.dashed ? "5 3" : undefined}
+              />
+            )
+          })}
+        </>
+      ) : null}
+
+      {/* FULL-HEIGHT drill hit-targets — rendered LAST so a tap anywhere in a
+          day's column (even directly on the band or a line) drills in. */}
+      {canDrill &&
+        dayGroups.map((g) => {
+          const [gx0, gx1] = dayBounds(g)
+          return (
+            <rect
+              key={`hit-${g.day}`}
+              x={gx0}
+              y={plotY0}
+              width={Math.max(gx1 - gx0, 1)}
+              height={plotH}
+              fill="transparent"
+              className="cursor-pointer"
+              onClick={() => onDrillDay!(g.day)}
+            >
+              <title>{`Open ${g.day}`}</title>
+            </rect>
+          )
+        })}
     </svg>
   )
 }
@@ -536,19 +621,6 @@ export function DivergingBars({
         const cBot = yDown(b.costs)
         return (
           <g key={b.key}>
-            {canDrill ? (
-              <rect
-                x={plotX0 + i * slot}
-                y={plotY0}
-                width={slot}
-                height={plotH}
-                fill="transparent"
-                className="cursor-pointer"
-                onClick={() => onDrill!(b.date)}
-              >
-                <title>{`Open ${b.label}`}</title>
-              </rect>
-            ) : null}
             {/* gross (up, green) */}
             {b.gross > 0 ? (
               <rect x={cx - barW / 2} y={gTop} width={barW} height={Math.max(zeroY - gTop, 0)} rx={1.5} fill="var(--color-ok)" />
@@ -564,6 +636,24 @@ export function DivergingBars({
           </g>
         )
       })}
+
+      {/* FULL-HEIGHT drill hit-targets on top: tap anywhere in a column, not
+          just on the bar, to open that period. */}
+      {canDrill &&
+        bars.map((b, i) => (
+          <rect
+            key={`hit-${b.key}`}
+            x={plotX0 + i * slot}
+            y={plotY0}
+            width={slot}
+            height={plotH}
+            fill="transparent"
+            className="cursor-pointer"
+            onClick={() => onDrill!(b.date)}
+          >
+            <title>{`Open ${b.label}`}</title>
+          </rect>
+        ))}
     </svg>
   )
 }

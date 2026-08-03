@@ -296,7 +296,8 @@ function TempTile({ label, value }: { label: string; value: string }) {
 // bands behind the daily bars. Blue accent when expanded, matching the app.
 
 type ChartMode = "daily" | "weekly" | "monthly"
-type Bar = { key: string; label: string; show: boolean; value: number; tou?: string }
+// `drill` is the Chicago date (YYYY-MM-DD) tapping this column jumps to.
+type Bar = { key: string; label: string; show: boolean; value: number; tou?: string; drill?: string }
 
 // Round a value up to a clean axis maximum (1/2/5 × 10ⁿ).
 function niceMax(v: number): number {
@@ -417,6 +418,7 @@ function CostChart() {
       label: dayShortLabel(d.day),
       show: true,
       value: d.spend,
+      drill: d.day, // tap a day → hourly view of that day
     }))
   } else {
     bars = (data?.weeks ?? []).map((w) => ({
@@ -424,7 +426,19 @@ function CostChart() {
       label: `Wk ${w.week}`,
       show: true,
       value: w.spend,
+      drill: w.startDay, // tap a week → daily view of that week
     }))
+  }
+
+  // Drill one level finer, anchored on the tapped column's date:
+  // monthly (weeks) → weekly, weekly (days) → daily.
+  function drillToDate(iso: string) {
+    const [y, m, d] = iso.split("-").map(Number)
+    if (!y || !m || !d) return
+    setSelYear(y)
+    setSelMonth(m)
+    setSelDay(d)
+    setMode(mode === "monthly" ? "weekly" : "daily")
   }
 
   const periodTotal =
@@ -523,7 +537,12 @@ function CostChart() {
         </p>
       ) : (
         <>
-          <BarChartSvg bars={bars} digits={2} showBands={mode === "daily"} />
+          <BarChartSvg
+            bars={bars}
+            digits={2}
+            showBands={mode === "daily"}
+            onDrill={mode === "daily" ? undefined : drillToDate}
+          />
           {mode === "daily" ? <TouLegend /> : null}
           <p className="mt-2 text-center text-xs text-muted">
             {totalLabel}:{" "}
@@ -537,14 +556,18 @@ function CostChart() {
 }
 
 // Pure SVG bar chart with labeled $ y-axis, time x-axis, and optional TOU bands.
+// When `onDrill` is set, each column gets a full-height tap target (rendered on
+// top) so tapping anywhere in the column — not just the bar — drills in.
 function BarChartSvg({
   bars,
   digits,
   showBands,
+  onDrill,
 }: {
   bars: Bar[]
   digits: number
   showBands: boolean
+  onDrill?: (dateIso: string) => void
 }) {
   const W = 340
   const H = 200
@@ -655,6 +678,26 @@ function BarChartSvg({
           </text>
         ) : null,
       )}
+
+      {/* FULL-HEIGHT tap targets, rendered last (on top of the bars) so a tap
+          anywhere in a column drills into that week/day. */}
+      {onDrill &&
+        bars.map((b, i) =>
+          b.drill ? (
+            <rect
+              key={`hit-${b.key}`}
+              x={plotX0 + i * slot}
+              y={plotY0}
+              width={slot}
+              height={plotH}
+              fill="transparent"
+              className="cursor-pointer"
+              onClick={() => onDrill(b.drill!)}
+            >
+              <title>{`Open ${b.label}`}</title>
+            </rect>
+          ) : null,
+        )}
     </svg>
   )
 }
