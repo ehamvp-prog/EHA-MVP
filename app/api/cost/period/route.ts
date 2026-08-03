@@ -38,25 +38,6 @@ function chicagoTodayParts(d = new Date()): { year: number; month: number; day: 
   }
 }
 
-// Chicago-local date + hour for a UTC instant, used to bucket minute rows.
-const CHI_HM = new Intl.DateTimeFormat("en-CA", {
-  timeZone: "America/Chicago",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  hour12: false,
-})
-function chicagoDateHour(instant: Date): { date: string; hour: number } {
-  const parts = CHI_HM.formatToParts(instant)
-  const y = parts.find((p) => p.type === "year")!.value
-  const m = parts.find((p) => p.type === "month")!.value
-  const d = parts.find((p) => p.type === "day")!.value
-  // hour12:false can emit "24" at midnight in some runtimes; normalize to 0.
-  const hour = Number(parts.find((p) => p.type === "hour")!.value) % 24
-  return { date: `${y}-${m}-${d}`, hour }
-}
-
 export async function GET(request: Request) {
   try {
     const supabase = createAdminClient()
@@ -82,19 +63,11 @@ export async function GET(request: Request) {
     const monthStart = iso(year, month, 1)
     const monthEnd = iso(year, month, daysInMonth)
 
-    // UTC window covering the anchor Chicago day with generous padding so we
-    // can bucket minute rows by their true Chicago hour regardless of offset.
-    const dayAnchorMs = new Date(`${anchor}T00:00:00Z`).getTime()
-    const minutesFrom = new Date(dayAnchorMs - 6 * 3600_000).toISOString()
-    const minutesTo = new Date(dayAnchorMs + 30 * 3600_000).toISOString()
-
-    const [minuteRows, monthDaysRes, monthsRes] = await Promise.all([
-      supabase
-        .from("energy_minutes")
-        .select("minute, cost, tou_period")
-        .eq("site_id", SITE_ID)
-        .gte("minute", minutesFrom)
-        .lt("minute", minutesTo),
+    const [hourlyRes, monthDaysRes, monthsRes] = await Promise.all([
+      // Hourly spend aggregated in Postgres over the dense energy_minutes ledger.
+      // Returns <=24 rows, so PostgREST's 1,000-row response cap can never drop
+      // daytime hours the way fetching raw minute rows + summing in JS did.
+      supabase.rpc("hourly_energy_for_day", { p_site_id: SITE_ID, p_day: anchor }),
       supabase
         .from("energy_daily")
         .select("day_local, cost")
@@ -107,18 +80,18 @@ export async function GET(request: Request) {
         .eq("site_id", SITE_ID)
         .order("month_local", { ascending: false }),
     ])
-    if (minuteRows.error) throw minuteRows.error
+    if (hourlyRes.error) throw hourlyRes.error
     if (monthDaysRes.error) throw monthDaysRes.error
     if (monthsRes.error) throw monthsRes.error
 
-    // ---- Hours (0..23, zero-filled) from per-minute rows of the anchor day ----
+    // ---- Hours (0..23, zero-filled) from the hourly RPC ----
     const hourSpend = new Array(24).fill(0)
     const hourTou = new Array<string | null>(24).fill(null)
-    for (const r of (minuteRows.data ?? []) as { minute: string; cost: number | string; tou_period: string | null }[]) {
-      const { date, hour } = chicagoDateHour(new Date(r.minute))
-      if (date !== anchor) continue
-      hourSpend[hour] += Number(r.cost ?? 0)
-      if (!hourTou[hour]) hourTou[hour] = r.tou_period ?? null
+    for (const r of (hourlyRes.data ?? []) as { hour: number; cost: number | string; tou_period: string | null }[]) {
+      const h = Number(r.hour)
+      if (h < 0 || h > 23) continue
+      hourSpend[h] = Number(r.cost ?? 0)
+      hourTou[h] = r.tou_period ?? null
     }
     const hours = Array.from({ length: 24 }, (_, h) => ({
       hour: h,
