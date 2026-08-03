@@ -15,6 +15,15 @@ import { comfortFromConditions } from "@/lib/comfort/ring"
 import { type ComfortProfile } from "@/lib/comfort/happy-number"
 import { chicagoParts, chicagoChartWindow, chicagoMonthIndex, type ChartView } from "@/lib/chicago-time"
 
+// A period during which one comfort anchor (learned target) was in effect.
+type AnchorRow = {
+  effective_from: string
+  effective_to: string
+  anchor_temp_f: number | string | null
+  anchor_rh: number | string | null
+  source: string | null
+}
+
 export const dynamic = "force-dynamic"
 
 const DEFAULT_PROFILE: ComfortProfile = {
@@ -60,7 +69,7 @@ export async function GET(request: Request) {
 
     const { fromISO, toISO, segments, days } = chicagoChartWindow(view, year, month, day)
 
-    const [segRes, profRes, monthsRes] = await Promise.all([
+    const [segRes, profRes, monthsRes, anchorRes] = await Promise.all([
       supabase.rpc("indoor_segments", {
         p_site_id: SITE_ID,
         p_from: fromISO,
@@ -73,6 +82,12 @@ export async function GET(request: Request) {
         .select("month_local")
         .eq("site_id", SITE_ID)
         .order("month_local", { ascending: false }),
+      // Anchor timeline for the SAME window → drives the Happy Number step line.
+      supabase.rpc("happy_anchor_history", {
+        p_site_id: SITE_ID,
+        p_from: fromISO,
+        p_to: toISO,
+      }),
     ])
     if (segRes.error) throw segRes.error
 
@@ -86,16 +101,52 @@ export async function GET(request: Request) {
       chicagoMonthIndex(),
     )
 
-    const points = ((segRes.data ?? []) as SegRow[]).map((r) => ({
-      day: String(r.day_local),
-      seg: Number(r.seg_index),
-      avgTemp: num(r.avg_temp_f),
-      minTemp: num(r.min_temp_f),
-      maxTemp: num(r.max_temp_f),
-      avgRh: num(r.avg_rh),
-      readings: Number(r.readings ?? 0),
-      source: r.source ?? null,
-    }))
+    // Anchor periods, oldest→newest. For any bucket we pick the anchor whose
+    // [from, to) span contains the bucket start — that's the target the system
+    // was learning toward at that moment.
+    const anchors = ((anchorRes.data ?? []) as AnchorRow[])
+      .map((a) => ({
+        from: new Date(a.effective_from).getTime(),
+        to: new Date(a.effective_to).getTime(),
+        tempF: Number(a.anchor_temp_f),
+        rh: Number(a.anchor_rh),
+      }))
+      .filter((a) => Number.isFinite(a.tempF) && Number.isFinite(a.rh))
+    const anchorAt = (ts: number) =>
+      anchors.find((a) => ts >= a.from && ts < a.to) ?? anchors[anchors.length - 1] ?? null
+
+    const points = ((segRes.data ?? []) as SegRow[]).map((r) => {
+      const avgTemp = num(r.avg_temp_f)
+      const avgRh = num(r.avg_rh)
+      const bucketStart = String(r.bucket_start)
+      const monthIdx = chicagoMonthIndex(new Date(bucketStart))
+
+      // Comfort Score for the bucket — v0's tested comfort model on the bucket's
+      // own avg temp + humidity (NOT computed in SQL). 0–100, right axis.
+      const comfortScore =
+        avgTemp != null && avgRh != null
+          ? comfortFromConditions(avgTemp, avgRh, profile, monthIdx)
+          : null
+
+      // Happy Number in effect during the bucket — the anchor's comfort score.
+      // Steps whenever training moved the anchor. 0–100, right axis.
+      const anchor = anchorAt(new Date(bucketStart).getTime())
+      const happyStep = anchor ? comfortFromConditions(anchor.tempF, anchor.rh, profile, monthIdx) : null
+
+      return {
+        day: String(r.day_local),
+        seg: Number(r.seg_index),
+        bucketStart,
+        avgTemp,
+        minTemp: num(r.min_temp_f),
+        maxTemp: num(r.max_temp_f),
+        avgRh,
+        comfortScore,
+        happyStep,
+        readings: Number(r.readings ?? 0),
+        source: r.source ?? null,
+      }
+    })
 
     const availableMonths = ((monthsRes.data ?? []) as { month_local: string }[]).map((r) => {
       const [y, m] = String(r.month_local).split("-").map(Number)
