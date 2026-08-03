@@ -786,8 +786,10 @@ function ComfortChart({
       }))
     }
   } else {
-    const nowCst = new Date(Date.now() - 6 * 60 * 60 * 1000)
-    const ym = `${nowCst.getUTCFullYear()}-${String(nowCst.getUTCMonth() + 1).padStart(2, "0")}`
+    // Current month in America/Chicago (DST-aware), matching the Chicago-bucketed
+    // day keys from the API — the old fixed -6h offset double-shifted this.
+    const { year, month } = chicagoParts()
+    const ym = `${year}-${String(month).padStart(2, "0")}`
     const monthDays = days.filter((d) => d.day.startsWith(ym))
     if (monthDays.length < 2) {
       fallback = "Still collecting — check back in a day or two."
