@@ -90,17 +90,16 @@ export function HomeView() {
   const { data } = useSWR<{ ok: boolean; computed: Computed }>("/api/compute/live", fetcher, {
     refreshInterval: 5000,
   })
-  const { data: cost } = useSWR<{ accumulated_cost: number; customer_charge: number }>(
+  const { data: cost } = useSWR<{ total_with_base_charge: number; energy_cost: number; customer_charge: number }>(
     "/api/cost/summary",
     fetcher,
     { refreshInterval: 15000 },
   )
-  const { data: history } = useSWR<{
-    days: { day: string; spend: number }[]
-    hours: { hour: number; spend: number; tou: string }[]
-    week_to_date: number
-    today: number
-  }>("/api/cost/history", fetcher, { refreshInterval: 60000 })
+  const { data: history } = useSWR<{ week_to_date: number; today: number }>(
+    "/api/cost/history",
+    fetcher,
+    { refreshInterval: 60000 },
+  )
   const { data: comfortHistory } = useSWR<{
     days: { day: string; tempF: number; comfort: number; happy: number }[]
     hours: { hour: number; tempF: number; comfort: number; happy: number }[]
@@ -174,7 +173,7 @@ export function HomeView() {
         <div className="grid grid-cols-3 gap-3">
           <CostTile label="Right now" value={c?.cost_per_hour != null ? `${money(c.cost_per_hour)}` : "—"} sub="per hour" big />
           <CostTile label="This week" value={money(history?.week_to_date)} sub="energy used" />
-          <CostTile label="This month" value={money(cost?.accumulated_cost)} sub="so far" />
+          <CostTile label="This month" value={money(cost?.total_with_base_charge)} sub="so far" />
         </div>
         <p className="mt-3 text-center text-xs text-muted-foreground">
           Includes your {money(cost?.customer_charge)} monthly Evergy base charge.

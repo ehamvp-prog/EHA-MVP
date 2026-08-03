@@ -65,7 +65,7 @@ export function PerformancePanel() {
     fetcher,
     { refreshInterval: 5000 },
   )
-  const { data: cost } = useSWR<{ accumulated_cost: number; customer_charge: number; month: string }>(
+  const { data: cost } = useSWR<{ total_with_base_charge: number; energy_cost: number; customer_charge: number; month: string }>(
     "/api/cost/summary",
     fetcher,
     { refreshInterval: 15000 },
@@ -217,7 +217,7 @@ export function PerformancePanel() {
         <div className="grid grid-cols-3 gap-3">
           <Stat label="Right now" value={c?.cost_per_hour != null ? `${money(c.cost_per_hour)}/hr` : "—"} />
           <Stat label="Rate" value={`${money(c?.rate_per_kwh, 5)}/kWh`} />
-          <Stat label="This month" value={money(cost?.accumulated_cost)} hint={cost ? `incl. ${money(cost.customer_charge)} base` : undefined} />
+          <Stat label="This month" value={money(cost?.total_with_base_charge)} hint={cost ? `incl. ${money(cost.customer_charge)} base` : undefined} />
         </div>
         <p className="mt-3 text-center text-xs text-muted">
           Evergy Kansas Metro RTOU · tariff energy only (riders excluded)

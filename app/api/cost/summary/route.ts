@@ -1,7 +1,9 @@
 // =====================================================================
 // GET /api/cost/summary
-// Returns the month-to-date accumulated cost (from the latest persisted
-// row) plus the fixed monthly customer charge, for the dashboard.
+// Month-to-date electricity cost for the current Central-time month, read
+// from the energy_monthly ledger view (computed every minute by cron from
+// raw telemetry). total_with_base_charge already folds in the fixed Evergy
+// customer charge; energy_cost is energy only. Reads NO accumulated_cost.
 // =====================================================================
 
 import { NextResponse } from "next/server"
@@ -11,37 +13,44 @@ import { SITE_ID } from "@/lib/compute-reading"
 export const dynamic = "force-dynamic"
 
 const MONTHLY_CUSTOMER_CHARGE = 14.25
-const CST_OFFSET_MS = 6 * 60 * 60 * 1000
 
-function cstMonthKey(iso: string): string {
-  const cst = new Date(new Date(iso).getTime() - CST_OFFSET_MS)
-  return `${cst.getUTCFullYear()}-${String(cst.getUTCMonth() + 1).padStart(2, "0")}`
+// First-of-month key in America/Chicago (matches energy_monthly.month_local).
+// Uses a real timezone conversion so it's correct across DST, unlike the old
+// fixed -6h offset hack.
+function chicagoMonthStart(d = new Date()): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(d)
+  const y = parts.find((p) => p.type === "year")!.value
+  const m = parts.find((p) => p.type === "month")!.value
+  return `${y}-${m}-01`
 }
 
 export async function GET() {
   try {
     const supabase = createAdminClient()
-    const { data: rows } = await supabase
-      .from("computed_readings")
-      .select("reading_at, accumulated_cost")
+    const monthStart = chicagoMonthStart()
+
+    const { data, error } = await supabase
+      .from("energy_monthly")
+      .select("month_local, energy_cost, total_with_base_charge, kwh")
       .eq("site_id", SITE_ID)
-      .order("reading_at", { ascending: false })
-      .limit(1)
+      .eq("month_local", monthStart)
+      .maybeSingle()
+    if (error) throw error
 
-    const last = rows?.[0] ?? null
-    const nowMonth = cstMonthKey(new Date().toISOString())
-    const sameMonth = last != null && cstMonthKey(last.reading_at) === nowMonth
-
+    // Before any energy is logged this month, only the standing customer
+    // charge has accrued.
     return NextResponse.json({
       ok: true,
-      month: nowMonth,
-      // If the latest row is from a prior month, this month has only
-      // accrued the standing customer charge so far.
-      accumulated_cost: sameMonth
-        ? Number(last!.accumulated_cost ?? MONTHLY_CUSTOMER_CHARGE)
-        : MONTHLY_CUSTOMER_CHARGE,
+      month: monthStart.slice(0, 7),
+      energy_cost: data ? Number(data.energy_cost) : 0,
+      total_with_base_charge: data ? Number(data.total_with_base_charge) : MONTHLY_CUSTOMER_CHARGE,
+      kwh: data ? Number(data.kwh) : 0,
       customer_charge: MONTHLY_CUSTOMER_CHARGE,
-      last_reading_at: last?.reading_at ?? null,
     })
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown error"

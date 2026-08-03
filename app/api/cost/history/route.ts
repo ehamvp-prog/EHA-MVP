@@ -1,8 +1,8 @@
 // =====================================================================
 // GET /api/cost/history
-// Read-only. Returns daily ENERGY spend for the last ~31 days (from the
-// daily_cost_history SQL function) plus a rolled-up "this week" total.
-// Used by the Home View cost-history chart. Changes no data.
+// Read-only. Returns the trailing-7-day and today energy spend for the
+// dashboard cost tiles, summed from the energy_daily ledger view (computed
+// every minute by cron from raw telemetry). Reads NO accumulated_cost.
 // =====================================================================
 
 import { NextResponse } from "next/server"
@@ -11,59 +11,43 @@ import { SITE_ID } from "@/lib/compute-reading"
 
 export const dynamic = "force-dynamic"
 
-const CST_OFFSET_MS = 6 * 60 * 60 * 1000
-
-// Today's date key in Evergy's Central time, matching the SQL bucketing.
-function cstToday(): string {
-  const cst = new Date(Date.now() - CST_OFFSET_MS)
-  return `${cst.getUTCFullYear()}-${String(cst.getUTCMonth() + 1).padStart(2, "0")}-${String(
-    cst.getUTCDate(),
-  ).padStart(2, "0")}`
+// Today's date key in America/Chicago (matches energy_daily.day_local). Real
+// timezone conversion — correct across DST.
+function chicagoToday(d = new Date()): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d)
 }
 
 export async function GET() {
   try {
     const supabase = createAdminClient()
-    const [daily, hourly] = await Promise.all([
-      supabase.rpc("daily_cost_history", { p_site_id: SITE_ID, p_days: 31 }),
-      supabase.rpc("hourly_cost_today", { p_site_id: SITE_ID }),
-    ])
-    if (daily.error) throw daily.error
-    if (hourly.error) throw hourly.error
 
-    const days: { day: string; spend: number }[] = (
-      (daily.data ?? []) as { day: string; spend: number | string }[]
-    ).map((r) => ({
-      day: String(r.day),
-      spend: Number(r.spend ?? 0),
-    }))
+    const today = chicagoToday()
+    // Trailing 7 calendar days, inclusive of today.
+    const cutoffDate = new Date(`${today}T12:00:00Z`)
+    cutoffDate.setUTCDate(cutoffDate.getUTCDate() - 6)
+    const cutoff = cutoffDate.toISOString().slice(0, 10)
 
-    // Today's per-hour spend + dominant TOU period (0..23 filled on client).
-    const hours: { hour: number; spend: number; tou: string }[] = (
-      (hourly.data ?? []) as { hour: number; avg_cost: number | string; tou_period: string | null }[]
-    ).map((r) => ({
-      hour: Number(r.hour),
-      spend: Number(r.avg_cost ?? 0),
-      tou: String(r.tou_period ?? "off_peak"),
-    }))
+    const { data, error } = await supabase
+      .from("energy_daily")
+      .select("day_local, cost")
+      .eq("site_id", SITE_ID)
+      .gte("day_local", cutoff)
+      .lte("day_local", today)
+    if (error) throw error
 
-    // Sum the trailing 7 calendar days (energy only) for the "this week" tile.
-    const cutoff = new Date(Date.now() - CST_OFFSET_MS - 6 * 24 * 60 * 60 * 1000)
-      .toISOString()
-      .slice(0, 10)
-    const weekToDate = days
-      .filter((d) => d.day >= cutoff)
-      .reduce((sum, d) => sum + d.spend, 0)
-
-    const today = cstToday()
-    const todaySpend = days.find((d) => d.day === today)?.spend ?? 0
+    const rows = (data ?? []) as { day_local: string; cost: number | string }[]
+    const week_to_date = rows.reduce((sum, r) => sum + Number(r.cost ?? 0), 0)
+    const todaySpend = Number(rows.find((r) => r.day_local === today)?.cost ?? 0)
 
     return NextResponse.json({
       ok: true,
-      days,
-      hours,
-      week_to_date: weekToDate,
-      today: todaySpend,
+      week_to_date: Math.round(week_to_date * 100) / 100,
+      today: Math.round(todaySpend * 100) / 100,
     })
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown error"
