@@ -50,3 +50,67 @@ export function chicagoMonthStartISO(d: Date = new Date()): string {
 export function chicagoMonthIndex(d: Date = new Date()): number {
   return chicagoParts(d).month - 1
 }
+
+// UTC instant of a Chicago wall-clock time (default midnight) on the given
+// calendar date. Uses the standard "guess then correct by actual offset" trick
+// so it's DST-correct without hardcoding -5/-6. Needed to build precise UTC
+// query windows that line up with the RPCs' day_local bucketing.
+export function chicagoWallClockToUtc(
+  year: number,
+  month: number, // 1–12
+  day: number,
+  hour = 0,
+): Date {
+  const guess = Date.UTC(year, month - 1, day, hour, 0, 0)
+  const asUtc = new Date(guess).toLocaleString("en-US", { timeZone: "UTC" })
+  const asChi = new Date(guess).toLocaleString("en-US", { timeZone: CHICAGO })
+  const offset = new Date(asUtc).getTime() - new Date(asChi).getTime()
+  return new Date(guess + offset)
+}
+
+export type ChartView = "daily" | "weekly" | "monthly"
+
+// Number of intraday segments per day for a given view. Weekly is denser than
+// monthly so a week's detail stays legible; daily drills all the way to hourly.
+export function segmentsForView(view: ChartView): number {
+  return view === "daily" ? 24 : view === "weekly" ? 12 : 8
+}
+
+// Resolve a [from, to) UTC window (as ISO strings) that exactly covers the
+// Chicago-local days implied by an anchor date under a given view:
+//   - daily:   the single anchor day
+//   - weekly:  the week-of-month chunk (1–7, 8–14, …) containing the anchor
+//   - monthly: the whole anchor month
+// Also returns the day list (YYYY-MM-DD, Chicago) the window spans, so callers
+// can zero-fill and wire per-day drill-down.
+export function chicagoChartWindow(
+  view: ChartView,
+  year: number,
+  month: number, // 1–12
+  day: number,
+): { fromISO: string; toISO: string; segments: number; days: string[] } {
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate()
+  const safeDay = Math.min(Math.max(day, 1), daysInMonth)
+  const iso = (d: number) => `${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`
+
+  let startDay: number
+  let endDay: number // inclusive
+  if (view === "daily") {
+    startDay = endDay = safeDay
+  } else if (view === "weekly") {
+    const weekOfMonth = Math.min(Math.ceil(safeDay / 7), 5)
+    startDay = (weekOfMonth - 1) * 7 + 1
+    endDay = Math.min(weekOfMonth * 7, daysInMonth)
+  } else {
+    startDay = 1
+    endDay = daysInMonth
+  }
+
+  const from = chicagoWallClockToUtc(year, month, startDay, 0)
+  // Exclusive upper bound = midnight after the last day.
+  const to = chicagoWallClockToUtc(year, month, endDay + 1, 0)
+  const days: string[] = []
+  for (let d = startDay; d <= endDay; d++) days.push(iso(d))
+
+  return { fromISO: from.toISOString(), toISO: to.toISOString(), segments: segmentsForView(view), days }
+}

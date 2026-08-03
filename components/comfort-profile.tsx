@@ -19,6 +19,7 @@ import {
   AlertTriangle,
   History,
   Undo2,
+  MoreHorizontal,
 } from "lucide-react"
 import {
   happyBand,
@@ -460,6 +461,9 @@ function ComfortRingCard({
 }) {
   const month = useMemo(() => monthCst(), [])
   const [explainOpen, setExplainOpen] = useState(false)
+  // Collapsed by default: card shows just the title + ring until expanded.
+  const [cardExpanded, setCardExpanded] = useState(false)
+  const [recsOpen, setRecsOpen] = useState(false)
 
   // TARGET — fixed; pure comfort of the (learned) preferred conditions.
   const target = useMemo(
@@ -561,56 +565,80 @@ function ComfortRingCard({
         <p className="mt-1 text-center text-[11px] text-muted">{sourceLabel}</p>
       </div>
 
-      {/* Tap-to-explain (only when target & reality diverge) */}
-      {!dialedIn ? (
-        <button
-          type="button"
-          onClick={() => setExplainOpen((v) => !v)}
-          aria-expanded={explainOpen}
-          className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl border border-border bg-elevated px-4 py-2.5 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
-        >
-          {explainOpen ? "Hide the gap" : "Why the gap?"}
-          <ChevronDown className={`h-4 w-4 transition-transform ${explainOpen ? "rotate-180" : ""}`} />
-        </button>
+      {/* "..." — reveal targets, the gap breakdown, recs, and training */}
+      <button
+        type="button"
+        onClick={() => setCardExpanded((v) => !v)}
+        aria-expanded={cardExpanded}
+        aria-label={cardExpanded ? "Hide details" : "Show details"}
+        className="mx-auto mt-3 flex h-8 items-center justify-center gap-1.5 rounded-full border border-border bg-elevated px-4 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+      >
+        {cardExpanded ? "Less" : "More"}
+        <MoreHorizontal className="h-4 w-4" />
+      </button>
+
+      {cardExpanded ? (
+        <>
+          {/* Tap-to-explain (only when target & reality diverge) */}
+          {!dialedIn ? (
+            <button
+              type="button"
+              onClick={() => setExplainOpen((v) => !v)}
+              aria-expanded={explainOpen}
+              className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl border border-border bg-elevated px-4 py-2.5 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+            >
+              {explainOpen ? "Hide the gap" : "Why the gap?"}
+              <ChevronDown className={`h-4 w-4 transition-transform ${explainOpen ? "rotate-180" : ""}`} />
+            </button>
+          ) : null}
+
+          {explainOpen && !dialedIn ? (
+            <GapBreakdown
+              gap={gapInfo}
+              nestConnected={nestConnected}
+              automationOn={!!automation?.auto_comfort_enabled}
+            />
+          ) : null}
+
+          {/* Ideal (learned) targets */}
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <MiniStat label="Target Temp" value={`${Math.round(profile.preferred_temp_f)}°F`} />
+            <MiniStat label="Target Humidity" value={`${Math.round(profile.preferred_rh)}%`} />
+          </div>
+
+          {/* Recommendations — title only, collapsible */}
+          {recs.length > 0 ? (
+            <div className="mt-5">
+              <button
+                type="button"
+                onClick={() => setRecsOpen((v) => !v)}
+                aria-expanded={recsOpen}
+                className="flex w-full items-center gap-2 text-sm font-semibold text-foreground"
+              >
+                <Sparkles className="h-4 w-4 text-primary" /> Personalized Recommendations
+                <ChevronDown className={`ml-auto h-4 w-4 text-muted transition-transform ${recsOpen ? "rotate-180" : ""}`} />
+              </button>
+              {recsOpen ? (
+                <ul className="mt-2 flex flex-col gap-2">
+                  {recs.map((r) => (
+                    <li key={r} className="flex items-start gap-2 text-sm text-muted-foreground text-pretty">
+                      <ThumbsUp className="mt-0.5 h-4 w-4 shrink-0 text-ok" />
+                      <span>{r}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
+
+          {/* Training capture */}
+          <CaptureTrainer realityTempF={realityTempF} realityRh={realityRh} source={source} />
+
+          <p className="mt-4 text-center text-[11px] text-muted">
+            An estimate — clothing and activity are inferred from your profile, not directly sensed.
+          </p>
+        </>
       ) : null}
-
-      {explainOpen && !dialedIn ? (
-        <GapBreakdown
-          gap={gapInfo}
-          nestConnected={nestConnected}
-          automationOn={!!automation?.auto_comfort_enabled}
-        />
-      ) : null}
-
-      {/* Ideal (learned) targets */}
-      <div className="mt-4 grid grid-cols-2 gap-3">
-        <MiniStat label="Target Temp" value={`${Math.round(profile.preferred_temp_f)}°F`} />
-        <MiniStat label="Target Humidity" value={`${Math.round(profile.preferred_rh)}%`} />
-      </div>
-
-      {/* Recommendations */}
-      {recs.length > 0 ? (
-        <div className="mt-5">
-          <h4 className="mb-2 flex items-center gap-2 text-sm font-semibold text-foreground">
-            <Sparkles className="h-4 w-4 text-primary" /> Personalized Recommendations
-          </h4>
-          <ul className="flex flex-col gap-2">
-            {recs.map((r) => (
-              <li key={r} className="flex items-start gap-2 text-sm text-muted-foreground text-pretty">
-                <ThumbsUp className="mt-0.5 h-4 w-4 shrink-0 text-ok" />
-                <span>{r}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-
-      {/* Training capture */}
-      <CaptureTrainer realityTempF={realityTempF} realityRh={realityRh} source={source} />
-
-      <p className="mt-4 text-center text-[11px] text-muted">
-        An estimate — clothing and activity are inferred from your profile, not directly sensed.
-      </p>
     </Card>
   )
 }
@@ -691,6 +719,8 @@ function CaptureTrainer({
   const [done, setDone] = useState(false)
   const [undoing, setUndoing] = useState(false)
   const [logOpen, setLogOpen] = useState(false)
+  // Collapsed by default: shows just the Capture button until expanded.
+  const [trainerExpanded, setTrainerExpanded] = useState(false)
   const ready = realityTempF != null && realityRh != null
 
   const { data: capData } = useSWR<{ ok: boolean; captures: Capture[] }>(
@@ -730,27 +760,45 @@ function CaptureTrainer({
 
   return (
     <div className="mt-5 rounded-xl border border-ok/30 bg-ok/5 p-4">
-      <h4 className="flex items-center gap-2 text-sm font-semibold text-ok">
-        <ThumbsUp className="h-4 w-4" /> Training Mode
-      </h4>
-      <p className="mt-1 text-sm text-muted-foreground text-pretty">
-        When your home feels exactly right, capture it. Elevate learns your ideal comfort from these
-        captures (recent ones count more) instead of fixed sliders.
-      </p>
-      <div className="mt-3 grid grid-cols-2 gap-3">
-        <MiniStat label="Current Temp" value={realityTempF != null ? `${Math.round(realityTempF)}°F` : "—"} />
-        <MiniStat label="Current Humidity" value={realityRh != null ? `${Math.round(realityRh)}%` : "—"} />
+      <div className="flex items-center justify-between gap-3">
+        <h4 className="flex items-center gap-2 text-sm font-semibold text-ok">
+          <ThumbsUp className="h-4 w-4" /> Training Mode
+        </h4>
+        <button
+          type="button"
+          onClick={() => setTrainerExpanded((v) => !v)}
+          aria-expanded={trainerExpanded}
+          aria-label={trainerExpanded ? "Hide training details" : "Show training details"}
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-border bg-elevated text-muted transition-colors hover:text-foreground"
+        >
+          <MoreHorizontal className="h-4 w-4" />
+        </button>
       </div>
+
+      {/* The smart button — always visible */}
       <button
         type="button"
         onClick={capture}
         disabled={!ready || saving}
         className="mt-3 w-full rounded-xl bg-ok px-4 py-3 text-sm font-semibold text-background transition-opacity disabled:opacity-50"
       >
-        {saving ? "Capturing…" : done ? "Captured — target updated ✓" : "I'm perfectly comfortable right now"}
+        {saving ? "Capturing…" : done ? "Captured ✓" : "Capture — I'm comfortable now"}
       </button>
 
-      {captures.length > 0 ? (
+      {trainerExpanded ? (
+        <>
+          <p className="mt-3 text-sm text-muted-foreground text-pretty">
+            When your home feels exactly right, capture it. Elevate learns your ideal comfort from these
+            captures (recent ones count more) instead of fixed sliders.
+          </p>
+          <div className="mt-3 grid grid-cols-2 gap-3">
+            <MiniStat label="Current Temp" value={realityTempF != null ? `${Math.round(realityTempF)}°F` : "—"} />
+            <MiniStat label="Current Humidity" value={realityRh != null ? `${Math.round(realityRh)}%` : "—"} />
+          </div>
+        </>
+      ) : null}
+
+      {trainerExpanded && captures.length > 0 ? (
         <>
           <div className="mt-3 flex items-center justify-center gap-2">
             <button
