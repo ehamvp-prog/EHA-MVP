@@ -55,11 +55,15 @@ type SavingsSummary = {
   unmeasurable_actions: number
 }
 
-// A row in the rendered journal: either a real automated action, or a
-// collapsed "System steady" span that stands in for a run of quiet check-ins.
+// A row in the rendered journal: a real automated action, a collapsed "System
+// steady" span standing in for a run of quiet check-ins, or a standalone
+// free-cooling daily summary. Free cooling has no automation_journal row (its
+// id is a deterministic hash, not a journal id), so it rides in as its own kind
+// rather than enriching an action.
 type DisplayItem =
   | { kind: "action"; entry: JournalEntry }
   | { kind: "steady"; id: string; startAt: string; endAt: string; count: number }
+  | { kind: "freecooling"; id: string; event: SavingsEvent }
 
 // Collapse consecutive "evaluation" (check-in) rows into a single steady
 // marker. Real actions pass through untouched. Input is newest-first, and
@@ -92,6 +96,25 @@ function buildDisplayItems(entries: JournalEntry[]): DisplayItem[] {
   }
   flush()
   return items
+}
+
+// Timestamp a display item sorts by (newest-first). Steady spans sort by their
+// most recent check-in.
+function itemTime(item: DisplayItem): number {
+  if (item.kind === "action") return new Date(item.entry.occurred_at).getTime()
+  if (item.kind === "freecooling") return new Date(item.event.occurred_at).getTime()
+  return new Date(item.endAt).getTime()
+}
+
+// Interleave free-cooling daily summaries into the journal by time. They arrive
+// via /api/savings/events (keyed by a deterministic hash id, not a journal id),
+// so they can't enrich an action row — they stand on their own.
+function mergeFreeCooling(items: DisplayItem[], events: SavingsEvent[]): DisplayItem[] {
+  const fc = events
+    .filter((e) => e.action_type === "free_cooling")
+    .map<DisplayItem>((event) => ({ kind: "freecooling", id: `fc-${event.id}`, event }))
+  if (fc.length === 0) return items
+  return [...items, ...fc].sort((a, b) => itemTime(b) - itemTime(a))
 }
 
 // Only render once the homeowner has automation history worth reviewing.
@@ -129,7 +152,9 @@ export function AutomationJournalCard() {
 
   // Collapse noisy consecutive "check-in" rows into a single "System steady"
   // marker, so the journal reads as a list of things that actually happened.
-  const items = buildDisplayItems(entries)
+  // Then fold in free-cooling daily summaries as standalone rows, time-ordered
+  // alongside the automation actions (they have no journal row to attach to).
+  const items = mergeFreeCooling(buildDisplayItems(entries), eventsData?.events ?? [])
 
   // Paginate: 5 display items per page, newest first. "Older" pages back in
   // time; there's no infinite scroll to blow up the screen.
@@ -180,6 +205,8 @@ export function AutomationJournalCard() {
             {visible.map((item) =>
               item.kind === "steady" ? (
                 <SteadyRow key={item.id} item={item} />
+              ) : item.kind === "freecooling" ? (
+                <FreeCoolingRow key={item.id} event={item.event} />
               ) : (
                 <JournalRow key={item.entry.id} entry={item.entry} event={eventById.get(item.entry.id)} />
               ),
@@ -324,6 +351,40 @@ function SteadyRow({ item }: { item: Extract<DisplayItem, { kind: "steady" }> })
           <span className="shrink-0 text-[11px] text-muted">{when(item.endAt)}</span>
         </div>
         <p className="mt-0.5 text-xs text-muted-foreground text-pretty">{detail}</p>
+      </div>
+    </li>
+  )
+}
+
+// A free-cooling daily summary. Not an automation action — it's the measured
+// cooling recovered off the coil after each compressor cycle, rolled up per
+// day. Explanation text comes prewritten from the savings engine.
+function FreeCoolingRow({ event }: { event: SavingsEvent }) {
+  const amt = event.measured_savings_usd
+  return (
+    <li className="flex items-start gap-3 rounded-xl border border-accent/25 bg-elevated p-3">
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent/15 text-accent">
+        <Snowflake className="h-4 w-4" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-sm font-medium text-foreground">Free cooling</span>
+          <span className="shrink-0 text-[11px] text-muted">{when(event.occurred_at)}</span>
+        </div>
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
+          {amt != null && amt > 0 ? (
+            <span className="flex items-center gap-1 text-ok">
+              <TrendingDown className="h-3 w-3" /> Saved ${amt.toFixed(2)}
+            </span>
+          ) : (
+            <span className="text-muted">No free cooling recovered</span>
+          )}
+        </div>
+        {event.explanation ? (
+          <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground text-pretty">
+            {event.explanation}
+          </p>
+        ) : null}
       </div>
     </li>
   )
