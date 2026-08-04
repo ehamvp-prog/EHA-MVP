@@ -55,11 +55,15 @@ type SavingsSummary = {
   unmeasurable_actions: number
 }
 
-// A row in the rendered journal: either a real automated action, or a
-// collapsed "System steady" span that stands in for a run of quiet check-ins.
+// A row in the rendered journal: a real automated action, a collapsed "System
+// steady" span standing in for a run of quiet check-ins, or a standalone
+// free-cooling daily summary. Free cooling has no automation_journal row (its
+// id is a deterministic hash, not a journal id), so it rides in as its own kind
+// rather than enriching an action.
 type DisplayItem =
   | { kind: "action"; entry: JournalEntry }
   | { kind: "steady"; id: string; startAt: string; endAt: string; count: number }
+  | { kind: "freecooling"; id: string; event: SavingsEvent }
 
 // Collapse consecutive "evaluation" (check-in) rows into a single steady
 // marker. Real actions pass through untouched. Input is newest-first, and
@@ -94,8 +98,30 @@ function buildDisplayItems(entries: JournalEntry[]): DisplayItem[] {
   return items
 }
 
+// Timestamp a display item sorts by (newest-first). Steady spans sort by their
+// most recent check-in.
+function itemTime(item: DisplayItem): number {
+  if (item.kind === "action") return new Date(item.entry.occurred_at).getTime()
+  if (item.kind === "freecooling") return new Date(item.event.occurred_at).getTime()
+  return new Date(item.endAt).getTime()
+}
+
+// Interleave free-cooling daily summaries into the journal by time. They arrive
+// via /api/savings/events (keyed by a deterministic hash id, not a journal id),
+// so they can't enrich an action row — they stand on their own.
+function mergeFreeCooling(items: DisplayItem[], events: SavingsEvent[]): DisplayItem[] {
+  const fc = events
+    .filter((e) => e.action_type === "free_cooling")
+    .map<DisplayItem>((event) => ({ kind: "freecooling", id: `fc-${event.id}`, event }))
+  if (fc.length === 0) return items
+  return [...items, ...fc].sort((a, b) => itemTime(b) - itemTime(a))
+}
+
 // Only render once the homeowner has automation history worth reviewing.
-export function AutomationJournalCard() {
+// `embedded` renders a slim, borderless toggle meant to live at the bottom of
+// another card (the savings section) — no outer card chrome, no "Measured
+// savings" badge, since the host card already owns the money story.
+export function AutomationJournalCard({ embedded = false }: { embedded?: boolean }) {
   const { data } = useSWR<{ ok: boolean; entries: JournalEntry[] }>(
     "/api/automation/journal",
     fetcher,
@@ -129,7 +155,9 @@ export function AutomationJournalCard() {
 
   // Collapse noisy consecutive "check-in" rows into a single "System steady"
   // marker, so the journal reads as a list of things that actually happened.
-  const items = buildDisplayItems(entries)
+  // Then fold in free-cooling daily summaries as standalone rows, time-ordered
+  // alongside the automation actions (they have no journal row to attach to).
+  const items = mergeFreeCooling(buildDisplayItems(entries), eventsData?.events ?? [])
 
   // Paginate: 5 display items per page, newest first. "Older" pages back in
   // time; there's no infinite scroll to blow up the screen.
@@ -137,6 +165,73 @@ export function AutomationJournalCard() {
   const pageCount = Math.max(1, Math.ceil(items.length / PAGE_SIZE))
   const safePage = Math.min(page, pageCount - 1)
   const visible = items.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE)
+
+  // Shared expandable body: the entry list, pager, and background note.
+  const body = collapsed ? null : (
+    <>
+      <ul className="mt-3 flex flex-col gap-2">
+        {visible.map((item) =>
+          item.kind === "steady" ? (
+            <SteadyRow key={item.id} item={item} />
+          ) : item.kind === "freecooling" ? (
+            <FreeCoolingRow key={item.id} event={item.event} />
+          ) : (
+            <JournalRow key={item.entry.id} entry={item.entry} event={eventById.get(item.entry.id)} />
+          ),
+        )}
+      </ul>
+
+      {pageCount > 1 ? (
+        <div className="mt-3 flex items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => setPage((p) => Math.max(0, p - 1))}
+            disabled={safePage === 0}
+            className="flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <ChevronLeft className="h-3.5 w-3.5" /> Newer
+          </button>
+          <span className="text-[11px] tabular-nums text-muted">
+            Page {safePage + 1} of {pageCount}
+          </span>
+          <button
+            type="button"
+            onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+            disabled={safePage >= pageCount - 1}
+            className="flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Older <ChevronRight className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      ) : null}
+
+      <p className="mt-3 flex items-center justify-center gap-1.5 text-center text-[11px] text-muted">
+        <ShieldCheck className="h-3 w-3 shrink-0" />
+        Automation runs automatically in the background — even when this app is closed.
+      </p>
+    </>
+  )
+
+  // Embedded: a slim, borderless toggle at the bottom of the host card. No card
+  // chrome and no measured-savings badge — the savings section already shows
+  // the money. Just a quiet "Automation Journal" affordance.
+  if (embedded) {
+    return (
+      <div className="mt-4 border-t border-border pt-3">
+        <button
+          type="button"
+          onClick={() => setCollapsed((v) => !v)}
+          aria-expanded={!collapsed}
+          className="flex w-full items-center justify-center gap-1.5 py-1 text-xs font-medium text-muted transition-colors hover:text-foreground"
+        >
+          <History className="h-3.5 w-3.5" />
+          Automation Journal
+          <ChevronDown className={`h-3.5 w-3.5 transition-transform ${collapsed ? "" : "rotate-180"}`} />
+        </button>
+        {body}
+      </div>
+    )
+  }
 
   return (
     <div className="rounded-2xl border border-border bg-card p-5 shadow-lg shadow-black/40">
@@ -174,48 +269,7 @@ export function AutomationJournalCard() {
         ) : null}
       </div>
 
-      {collapsed ? null : (
-        <>
-          <ul className="mt-3 flex flex-col gap-2">
-            {visible.map((item) =>
-              item.kind === "steady" ? (
-                <SteadyRow key={item.id} item={item} />
-              ) : (
-                <JournalRow key={item.entry.id} entry={item.entry} event={eventById.get(item.entry.id)} />
-              ),
-            )}
-          </ul>
-
-          {pageCount > 1 ? (
-            <div className="mt-3 flex items-center justify-between gap-2">
-          <button
-            type="button"
-            onClick={() => setPage((p) => Math.max(0, p - 1))}
-            disabled={safePage === 0}
-            className="flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <ChevronLeft className="h-3.5 w-3.5" /> Newer
-          </button>
-          <span className="text-[11px] tabular-nums text-muted">
-            Page {safePage + 1} of {pageCount}
-          </span>
-          <button
-            type="button"
-            onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
-            disabled={safePage >= pageCount - 1}
-            className="flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            Older <ChevronRight className="h-3.5 w-3.5" />
-          </button>
-        </div>
-          ) : null}
-
-          <p className="mt-3 flex items-center justify-center gap-1.5 text-center text-[11px] text-muted">
-            <ShieldCheck className="h-3 w-3 shrink-0" />
-            Automation runs automatically in the background — even when this app is closed.
-          </p>
-        </>
-      )}
+      {body}
     </div>
   )
 }
@@ -324,6 +378,40 @@ function SteadyRow({ item }: { item: Extract<DisplayItem, { kind: "steady" }> })
           <span className="shrink-0 text-[11px] text-muted">{when(item.endAt)}</span>
         </div>
         <p className="mt-0.5 text-xs text-muted-foreground text-pretty">{detail}</p>
+      </div>
+    </li>
+  )
+}
+
+// A free-cooling daily summary. Not an automation action — it's the measured
+// cooling recovered off the coil after each compressor cycle, rolled up per
+// day. Explanation text comes prewritten from the savings engine.
+function FreeCoolingRow({ event }: { event: SavingsEvent }) {
+  const amt = event.measured_savings_usd
+  return (
+    <li className="flex items-start gap-3 rounded-xl border border-accent/25 bg-elevated p-3">
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent/15 text-accent">
+        <Snowflake className="h-4 w-4" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-sm font-medium text-foreground">Free cooling</span>
+          <span className="shrink-0 text-[11px] text-muted">{when(event.occurred_at)}</span>
+        </div>
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
+          {amt != null && amt > 0 ? (
+            <span className="flex items-center gap-1 text-ok">
+              <TrendingDown className="h-3 w-3" /> Saved ${amt.toFixed(2)}
+            </span>
+          ) : (
+            <span className="text-muted">No free cooling recovered</span>
+          )}
+        </div>
+        {event.explanation ? (
+          <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground text-pretty">
+            {event.explanation}
+          </p>
+        ) : null}
       </div>
     </li>
   )

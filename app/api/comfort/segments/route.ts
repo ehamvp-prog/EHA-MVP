@@ -11,8 +11,8 @@
 import { NextResponse } from "next/server"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { SITE_ID } from "@/lib/compute-reading"
-import { comfortFromConditions } from "@/lib/comfort/ring"
-import { type ComfortProfile } from "@/lib/comfort/happy-number"
+import { loadComfortModel, deriveBandCached } from "@/lib/comfort/load"
+import { scoreAgainstBand, type ComfortBand, type ModelInputs } from "@/lib/comfort/model"
 import { chicagoParts, chicagoChartWindow, chicagoMonthIndex, type ChartView } from "@/lib/chicago-time"
 
 // A period during which one comfort anchor (learned target) was in effect.
@@ -25,15 +25,6 @@ type AnchorRow = {
 }
 
 export const dynamic = "force-dynamic"
-
-const DEFAULT_PROFILE: ComfortProfile = {
-  preferred_temp_f: 72,
-  preferred_rh: 45,
-  age_group: "adults",
-  activity_level: "moderate",
-  household_size: 2,
-  health_considerations: [],
-}
 
 type SegRow = {
   bucket_start: string
@@ -69,14 +60,18 @@ export async function GET(request: Request) {
 
     const { fromISO, toISO, segments, days } = chicagoChartWindow(view, year, month, day)
 
-    const [segRes, profRes, monthsRes, anchorRes] = await Promise.all([
+    const nowMonth = chicagoMonthIndex()
+    const nowCtx = { month: nowMonth, blower_on: false, night: false }
+
+    const [segRes, model, monthsRes, anchorRes] = await Promise.all([
       supabase.rpc("indoor_segments", {
         p_site_id: SITE_ID,
         p_from: fromISO,
         p_to: toISO,
         p_segments: segments,
       }),
-      supabase.from("comfort_profile").select("*").eq("site_id", SITE_ID).maybeSingle(),
+      // Unified comfort model (inputs + resolved constraints + derived band).
+      loadComfortModel(supabase, SITE_ID, nowCtx),
       supabase
         .from("energy_monthly")
         .select("month_local")
@@ -91,15 +86,14 @@ export async function GET(request: Request) {
     ])
     if (segRes.error) throw segRes.error
 
-    const profile: ComfortProfile = (profRes.data as ComfortProfile | null) ?? DEFAULT_PROFILE
-    // Happy Number = pure comfort of the user's preferred conditions, computed
-    // exactly like the settings screen. Flat reference line, never telemetry.
-    const happy = comfortFromConditions(
-      profile.preferred_temp_f,
-      profile.preferred_rh,
-      profile,
-      chicagoMonthIndex(),
-    )
+    const inputs: ModelInputs = model.inputs
+    // Happy Number = the household fingerprint (band width + centrality). Flat
+    // reference line, independent of telemetry and the night overlay.
+    const happy = model.band.happyNumber
+    // Comfort scoring's clothing assumption is seasonal — derive (memoized) a
+    // baseline band per distinct month the window spans.
+    const bandForMonth = (month0: number): ComfortBand =>
+      month0 === nowMonth ? model.band : deriveBandCached(inputs, { month: month0, blower_on: false, night: false })
 
     // Anchor periods, oldest→newest. For any bucket we pick the anchor whose
     // [from, to) span contains the bucket start — that's the target the system
@@ -120,18 +114,22 @@ export async function GET(request: Request) {
       const avgRh = num(r.avg_rh)
       const bucketStart = String(r.bucket_start)
       const monthIdx = chicagoMonthIndex(new Date(bucketStart))
+      const monthCtx = { month: monthIdx, blower_on: false, night: false }
+      const band = bandForMonth(monthIdx)
 
-      // Comfort Score for the bucket — v0's tested comfort model on the bucket's
-      // own avg temp + humidity (NOT computed in SQL). 0–100, right axis.
+      // Comfort Score for the bucket — the unified elevateComfort model scored
+      // against the household band on the bucket's own avg temp + humidity (NOT
+      // computed in SQL). 0–100, right axis.
       const comfortScore =
         avgTemp != null && avgRh != null
-          ? comfortFromConditions(avgTemp, avgRh, profile, monthIdx)
+          ? scoreAgainstBand(avgTemp, avgRh, band, inputs, monthCtx).score
           : null
 
-      // Happy Number in effect during the bucket — the anchor's comfort score.
-      // Steps whenever training moved the anchor. 0–100, right axis.
+      // Happy Number in effect during the bucket — the Comfort Score of the
+      // anchor (learned target) the system was training toward. Steps whenever
+      // training moved the anchor. 0–100, right axis.
       const anchor = anchorAt(new Date(bucketStart).getTime())
-      const happyStep = anchor ? comfortFromConditions(anchor.tempF, anchor.rh, profile, monthIdx) : null
+      const happyStep = anchor ? scoreAgainstBand(anchor.tempF, anchor.rh, band, inputs, monthCtx).score : null
 
       return {
         day: String(r.day_local),
@@ -163,7 +161,7 @@ export async function GET(request: Request) {
       segments,
       days,
       happy,
-      preferredTemp: profile.preferred_temp_f,
+      preferredTemp: inputs.preferred_temp_f,
       points,
       availableMonths,
     })

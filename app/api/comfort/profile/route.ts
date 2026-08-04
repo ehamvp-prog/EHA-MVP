@@ -1,9 +1,12 @@
 import { NextResponse } from "next/server"
 import { createAdminClient } from "@/lib/supabase/admin"
+import { comfortContext, loadComfortModel } from "@/lib/comfort/load"
+import { scoreAgainstBand } from "@/lib/comfort/model"
 
 export const dynamic = "force-dynamic"
 
 const AGE_GROUPS = new Set(["young_adults", "adults", "seniors", "mixed"])
+const OCCUPANTS = new Set(["seniors", "adults", "young_adults", "children"])
 const ACTIVITY = new Set(["sedentary", "moderate", "active"])
 const HEALTH = new Set([
   "asthma",
@@ -27,7 +30,57 @@ export async function GET(request: Request) {
       .eq("site_id", siteId)
       .maybeSingle()
     if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 })
-    return NextResponse.json({ ok: true, profile: data ?? null })
+
+    // Derive the unified comfort model server-side (the band needs the RPC-
+    // resolved constraints). The DISPLAYED Happy Number uses the BASELINE band
+    // (sleep overlay excluded) so it's a stable household fingerprint. We also
+    // compute the Comfort Score at the household's own stated preferred
+    // conditions and surface a note when that preference sits below the band's
+    // own floor (e.g. a senior floor above the stated 68°F).
+    const ctx = comfortContext({ blowerOn: false })
+    const baseCtx = { ...ctx, night: false }
+    const model = await loadComfortModel(supabase, siteId, baseCtx)
+    const band = model.band
+    const prefTemp = model.inputs.preferred_temp_f
+    const prefRh = model.inputs.preferred_rh
+    const prefScore = scoreAgainstBand(prefTemp, prefRh, band, model.inputs, baseCtx)
+
+    const preferredBelowFloor = band.active.some(
+      (c) => c.min_temp_f != null && prefTemp < c.min_temp_f,
+    )
+    const preferredFloor =
+      band.active.reduce<number | null>(
+        (acc, c) => (c.min_temp_f != null ? Math.max(acc ?? -Infinity, c.min_temp_f) : acc),
+        null,
+      ) ?? null
+
+    return NextResponse.json({
+      ok: true,
+      profile: data ?? null,
+      model: {
+        happyNumber: band.happyNumber,
+        preferredScore: prefScore.score,
+        factors: prefScore.factors,
+        // Full serializable band + inputs + ctx so the client can score LIVE
+        // reality against the exact same math (scoreAgainstBand is pure).
+        band,
+        inputs: model.inputs,
+        ctx: baseCtx,
+        summary: {
+          tLo: band.tLo,
+          tHi: band.tHi,
+          rhLo: band.rhLo,
+          rhHi: band.rhHi,
+          centroidTempF: band.centroidTempF,
+          centroidRh: band.centroidRh,
+          empty: band.empty,
+          dropped: band.dropped.map((d) => d.trigger_source || d.constraint_name),
+          tolerance: band.tolerance,
+        },
+        preferredBelowFloor,
+        preferredFloor,
+      },
+    })
   } catch (err) {
     return NextResponse.json(
       { ok: false, error: err instanceof Error ? err.message : "Unknown error" },
@@ -55,6 +108,14 @@ export async function POST(request: Request) {
       if (!Number.isNaN(n)) update.preferred_rh = Math.min(70, Math.max(20, n))
     }
     if ("age_group" in body && AGE_GROUPS.has(body.age_group)) update.age_group = body.age_group
+    // occupants is the new multi-select that drives the senior floor / child
+    // ceiling constraints. Validate + dedupe against the known set.
+    if ("occupants" in body && Array.isArray(body.occupants)) {
+      const occ = Array.from(
+        new Set(body.occupants.map((o: unknown) => String(o)).filter((o: string) => OCCUPANTS.has(o))),
+      )
+      update.occupants = occ
+    }
     if ("activity_level" in body && ACTIVITY.has(body.activity_level)) {
       update.activity_level = body.activity_level
     }
