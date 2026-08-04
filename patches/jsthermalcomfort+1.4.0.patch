@@ -1,0 +1,15 @@
+diff --git a/node_modules/jsthermalcomfort/lib/esm/types/models/pet_steady.d.ts b/node_modules/jsthermalcomfort/lib/esm/types/models/pet_steady.d.ts
+index be8926e..5e8feb9 100644
+--- a/node_modules/jsthermalcomfort/lib/esm/types/models/pet_steady.d.ts
++++ b/node_modules/jsthermalcomfort/lib/esm/types/models/pet_steady.d.ts
+@@ -1,8 +1,8 @@
+ export function pet_steady(tdb: any, tr: any, v: any, rh: any, met: any, clo: any, p_atm?: number, position?: number, age?: number, sex?: number, weight?: number, height?: number, wme?: number): {
+     pet: number;
+ };
+-export type NewtonRaphsonFunction = (: [number, number, number]) => [number, number, number];
+-export type NewtonRaphsonSingleFunction = (: [number]) => [number];
++export type NewtonRaphsonFunction = (args: [number, number, number]) => [number, number, number];
++export type NewtonRaphsonSingleFunction = (args: [number]) => [number];
+ export type PetSteadyResult = {
+     /**
+      * - Steady-state PET under the given ambient conditions

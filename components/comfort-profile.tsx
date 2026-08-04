@@ -22,42 +22,70 @@ import {
   MoreHorizontal,
 } from "lucide-react"
 import {
-  happyBand,
-  recommendations,
-  type ActivityLevel,
-  type AgeGroup,
-  type ComfortProfile as Profile,
-} from "@/lib/comfort/happy-number"
-import {
-  comfortFromConditions,
-  comfortDetail,
-  explainGap,
-  monthCst,
-  HAPPY_CLIMATE_GAP,
-  type Capture,
-} from "@/lib/comfort/ring"
+  scoreAgainstBand,
+  type ComfortBand,
+  type ModelInputs,
+  type ComfortFactor,
+  type ComfortContext,
+} from "@/lib/comfort/model"
+import { type Capture } from "@/lib/comfort/ring"
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
 
-type ProfileRow = Profile & {
+type ActivityLevel = "sedentary" | "moderate" | "active"
+type Occupant = "seniors" | "adults" | "young_adults" | "children"
+
+// The comfort profile row as stored — now driven by `occupants` (multi-select)
+// rather than the old single age_group picker.
+type ProfileRow = {
+  preferred_temp_f: number
+  preferred_rh: number
+  occupants: Occupant[]
+  activity_level: ActivityLevel
+  household_size: number
+  health_considerations: string[]
   anchor_set_at: string | null
+}
+
+// The derived model the server ships alongside the profile. Everything the ring
+// and breakdown need to score LIVE reality client-side without re-deriving.
+type ProfileModel = {
+  happyNumber: number
+  preferredScore: number
+  factors: ComfortFactor[]
+  band: ComfortBand
+  inputs: ModelInputs
+  ctx: ComfortContext
+  summary: {
+    tLo: number
+    tHi: number
+    rhLo: number
+    rhHi: number
+    centroidTempF: number
+    centroidRh: number
+    empty: boolean
+    dropped: string[]
+    tolerance: number
+  }
+  preferredBelowFloor: boolean
+  preferredFloor: number | null
 }
 
 const DEFAULT_PROFILE: ProfileRow = {
   preferred_temp_f: 72,
   preferred_rh: 45,
-  age_group: "mixed",
+  occupants: ["adults"],
   activity_level: "moderate",
   household_size: 2,
   health_considerations: [],
   anchor_set_at: null,
 }
 
-const AGE_OPTIONS: { value: AgeGroup; label: string }[] = [
-  { value: "young_adults", label: "Young Adults (18-35)" },
-  { value: "adults", label: "Adults (36-55)" },
-  { value: "seniors", label: "Seniors (55+)" },
-  { value: "mixed", label: "Mixed Household" },
+const OCCUPANT_OPTIONS: { value: Occupant; label: string; sub: string }[] = [
+  { value: "seniors", label: "Seniors", sub: "55+ — needs it no cooler than 70°F" },
+  { value: "adults", label: "Adults", sub: "36-55" },
+  { value: "young_adults", label: "Young Adults", sub: "18-35" },
+  { value: "children", label: "Young Children", sub: "needs it no warmer than 76°F" },
 ]
 
 const ACTIVITY_OPTIONS: { value: ActivityLevel; label: string; sub: string }[] = [
@@ -76,11 +104,96 @@ const HEALTH_OPTIONS: { value: string; label: string }[] = [
   { value: "sleep_issues", label: "Sleep Issues" },
 ]
 
+// Score → label + semantic color, for the reality arc / status line.
+function happyBand(score: number): { label: string; color: "ok" | "warn" } {
+  if (score >= 80) return { label: "Comfortable", color: "ok" }
+  if (score >= 60) return { label: "Slightly off", color: "warn" }
+  if (score >= 40) return { label: "Uncomfortable", color: "warn" }
+  return { label: "Well outside your range", color: "warn" }
+}
+
+// A plain-English gap breakdown derived entirely from the unified model's
+// scoreAgainstBand() output + the household band. Replaces the old explainGap.
+type GapView = {
+  gap: number
+  withinRange: boolean
+  primary: "temperature" | "humidity" | "none"
+  plain: string
+  fanWouldHelp: boolean
+  suggestedSetpointF: number | null
+}
+
+// A factor's code tells us which axis it binds on.
+const HUMIDITY_CODES = new Set([
+  "respiratory_humidity_floor",
+  "allergen_humidity_ceiling",
+  "asthma_humidity_ceiling",
+  "respiratory_humidity_ceiling",
+])
+const TEMP_CODES = new Set([
+  "senior_thermal_floor",
+  "child_activity_ceiling",
+  "sleep_night_window",
+])
+
+function factorAxis(code: string, tempF: number, rh: number, band: ComfortBand): GapView["primary"] {
+  if (HUMIDITY_CODES.has(code)) return "humidity"
+  if (TEMP_CODES.has(code)) return "temperature"
+  if (code === "thermal") return "temperature"
+  // Fallback: whichever edge the point is further outside of.
+  const dRh = rh > band.rhHi ? rh - band.rhHi : rh < band.rhLo ? band.rhLo - rh : 0
+  const dT = tempF > band.tHi ? tempF - band.tHi : tempF < band.tLo ? band.tLo - tempF : 0
+  return dRh > dT ? "humidity" : "temperature"
+}
+
+function buildGap(
+  realityTempF: number,
+  realityRh: number,
+  band: ComfortBand,
+  inputs: ModelInputs,
+  ctx: ComfortContext,
+): { view: GapView; factors: ComfortFactor[] } {
+  const detail = scoreAgainstBand(realityTempF, realityRh, band, inputs, ctx)
+  const gap = Math.max(0, Math.round(band.happyNumber - detail.score))
+  // Within ~5pt of the Happy Number (plus tolerance) = dialed in.
+  const withinRange = detail.score >= band.happyNumber - (5 + band.tolerance)
+
+  const binding = detail.factors.filter((f) => f.severity === "binding")
+  // Primary driver = the axis of the first binding constraint (respiratory
+  // floor is listed first when multiple bind).
+  const primary: GapView["primary"] = withinRange
+    ? "none"
+    : binding.length
+      ? factorAxis(binding[0].code, realityTempF, realityRh, band)
+      : "none"
+
+  const plain = withinRange
+    ? "Your home is within your household's comfort range."
+    : binding[0]?.label
+      ? `Your home reads ${Math.round(realityTempF)}°F / ${Math.round(realityRh)}% — ${binding[0].label}.`
+      : `Your home is ${gap} points below your Happy Number of ${band.happyNumber}.`
+
+  // Nudge toward the band centroid temp; the engine hunts the same way.
+  const suggestedSetpointF =
+    primary === "temperature" || (primary === "none" && !withinRange)
+      ? Math.round(band.centroidTempF)
+      : null
+  const fanWouldHelp = primary === "humidity"
+
+  return { view: { gap, withinRange, primary, plain, fanWouldHelp, suggestedSetpointF }, factors: detail.factors }
+}
+
+// Recommendations derived from the binding + conflict factors.
+function recsFromFactors(factors: ComfortFactor[]): string[] {
+  return factors.filter((f) => f.severity !== "good").map((f) => f.label)
+}
+
 export function ComfortProfilePanel() {
-  const { data } = useSWR<{ ok: boolean; profile: ProfileRow | null }>(
+  const { data } = useSWR<{ ok: boolean; profile: ProfileRow | null; model: ProfileModel | null }>(
     "/api/comfort/profile",
     fetcher,
   )
+  const model = data?.model ?? null
 
   // Capture log — if any captures exist, the comfort target is LEARNED, so a
   // manual slider change is an override that must be explicitly confirmed.
@@ -96,13 +209,11 @@ export function ComfortProfilePanel() {
   const [savedAt, setSavedAt] = useState<number | null>(null)
   const [confirmOverride, setConfirmOverride] = useState(false)
 
-  // The calculated TARGET comfort score these preferences produce (pure ASHRAE
-  // 55, same math as the dual ring's outer arc). Updates live as sliders move.
-  const month = useMemo(() => monthCst(), [])
-  const targetScore = useMemo(
-    () => comfortFromConditions(form.preferred_temp_f, form.preferred_rh, form, month),
-    [form, month],
-  )
+  // The Happy Number — the household fingerprint (band width + centrality),
+  // derived server-side from the full six-input model. It is NOT a function of
+  // the temp/humidity sliders (those set the target the system trains toward),
+  // so it stays stable until the demographics/health inputs change and save.
+  const targetScore = model?.happyNumber ?? 0
 
   // Did the user change the learned comfort target (temp/humidity)?
   const targetChanged =
@@ -119,6 +230,14 @@ export function ComfortProfilePanel() {
 
   const set = <K extends keyof ProfileRow>(key: K, value: ProfileRow[K]) => {
     setForm((f) => ({ ...f, [key]: value }))
+    setDirty(true)
+  }
+
+  const toggleOccupant = (v: Occupant) => {
+    setForm((f) => {
+      const has = f.occupants.includes(v)
+      return { ...f, occupants: has ? f.occupants.filter((x) => x !== v) : [...f.occupants, v] }
+    })
     setDirty(true)
   }
 
@@ -211,13 +330,28 @@ export function ComfortProfilePanel() {
           title="Household Demographics"
           sub="Help us understand who lives in your home"
         />
-        <FieldLabel icon={<Users className="h-4 w-4 text-muted" />}>Primary Age Group</FieldLabel>
+        <FieldLabel icon={<Users className="h-4 w-4 text-muted" />}>Who lives here?</FieldLabel>
+        <p className="mb-2 text-xs text-muted">
+          Select everyone — these intersect to narrow your comfort range, they don&apos;t average.
+        </p>
         <div className="grid grid-cols-2 gap-2">
-          {AGE_OPTIONS.map((o) => (
-            <PillButton key={o.value} active={form.age_group === o.value} onClick={() => set("age_group", o.value)}>
-              {o.label}
-            </PillButton>
-          ))}
+          {OCCUPANT_OPTIONS.map((o) => {
+            const active = form.occupants.includes(o.value)
+            return (
+              <button
+                key={o.value}
+                type="button"
+                onClick={() => toggleOccupant(o.value)}
+                aria-pressed={active}
+                className={`flex flex-col rounded-xl border px-3 py-2.5 text-left transition-colors ${
+                  active ? "border-primary bg-primary/10" : "border-border bg-elevated hover:border-muted"
+                }`}
+              >
+                <span className="text-sm font-semibold text-foreground">{o.label}</span>
+                <span className="text-[11px] leading-snug text-muted">{o.sub}</span>
+              </button>
+            )
+          })}
         </div>
 
         <FieldLabel icon={<Activity className="h-4 w-4 text-muted" />} className="mt-5">
@@ -399,10 +533,11 @@ export function HappyNumberPanel({
   liveRh: number | null
   systemRunning: boolean
 }) {
-  const { data, isLoading } = useSWR<{ ok: boolean; profile: ProfileRow | null }>(
-    "/api/comfort/profile",
-    fetcher,
-  )
+  const { data, isLoading } = useSWR<{
+    ok: boolean
+    profile: ProfileRow | null
+    model: ProfileModel | null
+  }>("/api/comfort/profile", fetcher)
   // Nest is the primary reality source; dedupes with the Nest card's poll.
   const { data: nest } = useSWR<NestData>("/api/nest/data", fetcher, { refreshInterval: 300000 })
   // Automation flags drive the tap-to-explain copy ("we're handling this").
@@ -411,9 +546,7 @@ export function HappyNumberPanel({
     fetcher,
   )
 
-  const profile: Profile = data?.profile
-    ? { ...DEFAULT_PROFILE, ...data.profile, health_considerations: data.profile.health_considerations ?? [] }
-    : DEFAULT_PROFILE
+  const model = data?.model ?? null
   const hasProfile = data ? data.profile != null : null
 
   // Fallback chain: Nest ambient (primary) → return-air sensor (fallback).
@@ -425,7 +558,7 @@ export function HappyNumberPanel({
 
   return (
     <ComfortRingCard
-      profile={profile}
+      model={model}
       hasProfile={hasProfile}
       isLoading={isLoading}
       realityTempF={realityTempF}
@@ -439,7 +572,7 @@ export function HappyNumberPanel({
 }
 
 function ComfortRingCard({
-  profile,
+  model,
   hasProfile,
   isLoading,
   realityTempF,
@@ -449,7 +582,7 @@ function ComfortRingCard({
   automation,
   systemRunning,
 }: {
-  profile: Profile
+  model: ProfileModel | null
   hasProfile: boolean | null
   isLoading: boolean
   realityTempF: number | null
@@ -459,40 +592,31 @@ function ComfortRingCard({
   automation: AutomationFlags | null
   systemRunning: boolean
 }) {
-  const month = useMemo(() => monthCst(), [])
   const [explainOpen, setExplainOpen] = useState(false)
   // Collapsed by default: card shows just the title + ring until expanded.
   const [cardExpanded, setCardExpanded] = useState(false)
   const [recsOpen, setRecsOpen] = useState(false)
 
-  // TARGET — fixed; pure comfort of the (learned) preferred conditions.
-  const target = useMemo(
-    () => comfortFromConditions(profile.preferred_temp_f, profile.preferred_rh, profile, month),
-    [profile, month],
-  )
+  // TARGET — the household Happy Number (band fingerprint), stable all day.
+  const target = model?.happyNumber ?? 0
 
-  // REALITY — pure comfort of the live conditions; the only number that moves.
+  // REALITY — Comfort Score of the live conditions against the baseline band;
+  // the only number that moves. Scored with the SAME pure model as the engine.
   const reality = useMemo(() => {
-    if (realityTempF == null || realityRh == null) return null
-    return comfortDetail(realityTempF, realityRh, profile, month).comfort
-  }, [realityTempF, realityRh, profile, month])
+    if (model == null || realityTempF == null || realityRh == null) return null
+    return scoreAgainstBand(realityTempF, realityRh, model.band, model.inputs, model.ctx).score
+  }, [model, realityTempF, realityRh])
 
-  const gapInfo = useMemo(() => {
-    if (realityTempF == null || realityRh == null) return null
-    return explainGap({
-      liveTempF: realityTempF,
-      liveRh: realityRh,
-      targetTempF: profile.preferred_temp_f,
-      targetRh: profile.preferred_rh,
-      profile,
-      month,
-    })
-  }, [realityTempF, realityRh, profile, month])
+  const gapData = useMemo(() => {
+    if (model == null || realityTempF == null || realityRh == null) return null
+    return buildGap(realityTempF, realityRh, model.band, model.inputs, model.ctx)
+  }, [model, realityTempF, realityRh])
+  const gapInfo = gapData?.view ?? null
 
   const recs = useMemo(() => {
-    if (realityRh == null) return []
-    return recommendations({ liveRh: realityRh, profile })
-  }, [realityRh, profile])
+    if (gapData == null) return []
+    return recsFromFactors(gapData.factors)
+  }, [gapData])
 
   if (isLoading) {
     return (
@@ -600,11 +724,24 @@ function ComfortRingCard({
             />
           ) : null}
 
-          {/* Ideal (learned) targets */}
+          {/* Household band — the range the system trains toward */}
           <div className="mt-4 grid grid-cols-2 gap-3">
-            <MiniStat label="Target Temp" value={`${Math.round(profile.preferred_temp_f)}°F`} />
-            <MiniStat label="Target Humidity" value={`${Math.round(profile.preferred_rh)}%`} />
+            <MiniStat
+              label="Comfort Range"
+              value={model ? `${Math.round(model.summary.tLo)}–${Math.round(model.summary.tHi)}°F` : "—"}
+            />
+            <MiniStat
+              label="Humidity Range"
+              value={model ? `${Math.round(model.summary.rhLo)}–${Math.round(model.summary.rhHi)}%` : "—"}
+            />
           </div>
+          {model?.preferredBelowFloor && model.preferredFloor != null ? (
+            <p className="mt-2 flex items-start gap-1.5 rounded-lg border border-warn/30 bg-warn/5 px-3 py-2 text-[11px] text-warn text-pretty">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              Your preferred temperature sits below your household&apos;s {Math.round(model.preferredFloor)}°F floor
+              (seniors present) — we target the achievable range instead.
+            </p>
+          ) : null}
 
           {/* Recommendations — title only, collapsible */}
           {recs.length > 0 ? (
@@ -649,7 +786,7 @@ function GapBreakdown({
   nestConnected,
   automationOn,
 }: {
-  gap: ReturnType<typeof explainGap>
+  gap: GapView
   nestConnected: boolean
   automationOn: boolean
 }) {

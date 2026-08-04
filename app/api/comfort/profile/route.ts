@@ -61,7 +61,12 @@ export async function GET(request: Request) {
         happyNumber: band.happyNumber,
         preferredScore: prefScore.score,
         factors: prefScore.factors,
-        band: {
+        // Full serializable band + inputs + ctx so the client can score LIVE
+        // reality against the exact same math (scoreAgainstBand is pure).
+        band,
+        inputs: model.inputs,
+        ctx: baseCtx,
+        summary: {
           tLo: band.tLo,
           tHi: band.tHi,
           rhLo: band.rhLo,
