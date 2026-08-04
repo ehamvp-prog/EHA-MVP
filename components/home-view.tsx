@@ -144,6 +144,10 @@ export function HomeView() {
           {/* 2. Savings — measured value, kept high while attention is fresh */}
           <SavingsSection />
 
+          {/* Automation journal — sits directly under savings, since its entries
+              (free cooling, comfort adjustments, coasting) explain that value */}
+          <AutomationJournalCard />
+
       {/* 3. What you're spending — real dollars against real TOU rates */}
       <div className="rounded-2xl border border-border bg-card p-5 shadow-lg shadow-black/40">
         <SectionHeader icon={<DollarSign className="h-5 w-5 text-ok" />} title="What you're spending" />
@@ -178,9 +182,6 @@ export function HomeView() {
 
           {/* 5. Efficiency history — measured EER against nameplate, minute by minute */}
           <EfficiencyChart />
-
-          {/* 6. Automation journal — self-hides until there's history */}
-          <AutomationJournalCard />
 
           {/* 7. Filter health — needle gauge driven by filter LOAD ratio */}
           <FilterHealthCard staticInWc={c?.static_pressure_inwc ?? null} />
