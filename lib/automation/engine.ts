@@ -56,16 +56,25 @@ const COMFORT_STEP_F = 1
 // Hard safety floor — the setpoint may never be pushed below this while hunting
 // (spec §6: "Never cross the 68°F safety floor").
 const SAFETY_FLOOR_F = 68
+// Savings mode widens the comfort deadband by this many points so the engine
+// tolerates drift and only intervenes when comfort really falls below the band.
+const SAVINGS_DRIFT_POINTS = 8
 // Confirmation tolerance — SDM rounds to ~0.5°C, so allow ~1°F slack.
 const CONFIRM_TOLERANCE_F = 1
 
 export type TickResult = { ran: boolean; action: string | null; detail?: string }
+
+type AutomationMode = "manual" | "comfort" | "savings" | "balanced"
 
 type BeforeState = {
   temp_f: number
   rh: number
   setpoint_f: number | null
   comfort_score: number
+  // The active automation mode at evaluation time. Persisted on EVERY journal
+  // row so a savings figure can later be explained ("Savings was off that
+  // week" must be answerable from the data alone).
+  mode: AutomationMode
 }
 
 // SupabaseClient is loosely typed in this project; alias for readability.
@@ -240,17 +249,33 @@ async function confirmPending(
 export async function runAutomationTick(): Promise<TickResult> {
   const db = createAdminClient()
 
-  const [{ data: sys }, { data: comfortRaw }, inputsRes, constraintsRes] = await Promise.all([
+  const [{ data: sys }, { data: comfortRaw }, inputsRes, constraintsRes, modeRes] = await Promise.all([
     db.from("system_profile").select("*").eq("site_id", SITE_ID).maybeSingle(),
     db.from("comfort_profile").select("*").eq("site_id", SITE_ID).maybeSingle(),
     db.rpc("comfort_model_inputs", { p_site_id: SITE_ID }),
     db.rpc("comfort_band_constraints", { p_site_id: SITE_ID }),
+    db.rpc("current_automation_mode", { p_site_id: SITE_ID }),
   ])
 
   const autoComfort = !!sys?.auto_comfort_enabled
   const peakDodger = !!sys?.peak_dodger_enabled
   if (!autoComfort && !peakDodger) return { ran: false, action: null, detail: "no automations enabled" }
   if (!comfortRaw) return { ran: false, action: null, detail: "no comfort profile" }
+
+  // The user's active automation mode. Balanced (comfort+savings) is the
+  // default; treat anything unexpected as balanced so we never act rogue.
+  const rawMode = String(modeRes.data ?? "balanced") as AutomationMode
+  const mode: AutomationMode = ["manual", "comfort", "savings", "balanced"].includes(rawMode)
+    ? rawMode
+    : "balanced"
+  // Mode layers over enrollment: a customer must be enrolled AND their mode
+  // must permit the behavior. Manual disables all actuation.
+  //   manual   — no hunting, no coasting, no precooling (still logs + measures)
+  //   comfort  — hunt only, peak dodging OFF
+  //   savings  — hunt below floor + peak dodging ON, widened deadband
+  //   balanced — hunt + peak dodging ON, coasting bounded by the band
+  const comfortAllowed = autoComfort && mode !== "manual"
+  const peakAllowed = peakDodger && (mode === "savings" || mode === "balanced")
 
   // Build the unified model inputs (numbers may arrive as strings) + resolved
   // constraint rows. The DB is the source of truth for constraints.
@@ -335,6 +360,15 @@ export async function runAutomationTick(): Promise<TickResult> {
     rh: realityRh,
     setpoint_f: thermostat?.coolSetpointF ?? null,
     comfort_score: realityScore,
+    mode,
+  }
+
+  // Manual — the user runs their own system. Take no action of any kind, but
+  // keep confirming pending commands (above) and log a heartbeat so evaluation
+  // and savings tracking continue and honestly attribute $0 to automation.
+  if (mode === "manual") {
+    await maybeHeartbeat(db, "manual mode — automation off, no action taken", before)
+    return { ran: false, action: null, detail: "manual mode" }
   }
 
   const lastAct = await lastActuationTime(db)
@@ -349,7 +383,11 @@ export async function runAutomationTick(): Promise<TickResult> {
   const coolingMode = thermostat?.mode === "COOL" || thermostat?.mode === "HEATCOOL"
 
   // ---- Automation 2: Peak Dodger (time-critical, evaluated first) ----------
-  if (peakDodger && season === "summer" && isWeekday && !holiday) {
+  // Balanced coasts only within the band: cap the warm-side setpoint at the
+  // band's upper temp edge so peak coasting can never push comfort out of band.
+  // Savings coasts to the full safety limit (tolerates drift).
+  const coastMaxF = mode === "balanced" ? Math.min(maxF, Math.round(huntBand.tHi)) : maxF
+  if (peakAllowed && season === "summer" && isWeekday && !holiday) {
     // Pre-cool window: 2–4 PM CST (before the 4–8 PM peak).
     if (parts.hour >= 14 && parts.hour < 16) {
       if (nestConnected && coolingMode && thermostat?.coolSetpointF != null) {
@@ -382,7 +420,13 @@ export async function runAutomationTick(): Promise<TickResult> {
     else if (parts.hour >= 16 && parts.hour < 20) {
       if (nestConnected && coolingMode && thermostat?.coolSetpointF != null) {
         if (!inCooldown && !(await didActionToday(db, "peak_coast", nowMs))) {
-          const clamp = clampSetpoint(thermostat.coolSetpointF + coastOffset, minF, maxF)
+          const clamp = clampSetpoint(thermostat.coolSetpointF + coastOffset, minF, coastMaxF)
+          // Balanced: if we're already at the band's warm edge, coasting further
+          // would exit the band — stop coasting rather than sacrifice comfort.
+          if (mode === "balanced" && clamp.value <= Math.round(thermostat.coolSetpointF)) {
+            await maybeHeartbeat(db, "balanced — holding at band edge, not coasting further", before)
+            return { ran: false, action: null, detail: "balanced coast bounded by band" }
+          }
           await applyControl(token!, {
             coolSetpointF: clamp.value,
             ...(fanEnabled ? { fanMode: "ON" as const } : {}),
@@ -390,7 +434,7 @@ export async function runAutomationTick(): Promise<TickResult> {
           await insertJournal(db, {
             action_type: "peak_coast",
             trigger_reason: clamp.clamped
-              ? `Coasting through peak — held at ${clamp.value}°F safety limit`
+              ? `Coasting through peak — held at ${clamp.value}°F ${mode === "balanced" ? "band edge" : "safety limit"}`
               : `Eased to ${clamp.value}°F to coast through peak hours${fanEnabled ? ", fan circulating" : ""}`,
             command_sent: { coolSetpoint: clamp.value, ...(fanEnabled ? { fan: "ON" } : {}) },
             nest_confirmed: null,
@@ -418,7 +462,7 @@ export async function runAutomationTick(): Promise<TickResult> {
   //   gap  >  band   -> overshooting: relax toward the nearest edge, save energy
   // Spec §7 — offline: when the thermostat is down (null setpoint) we scored
   // return-duct air, not the room. Do not evaluate, do not act.
-  if (autoComfort) {
+  if (comfortAllowed) {
     // §7 Offline guard. Nest connected but no setpoint = thermostat offline.
     if (nestConnected && coolingMode && thermostat?.coolSetpointF == null) {
       await maybeHeartbeat(db, "thermostat offline, cannot evaluate", before)
@@ -426,7 +470,9 @@ export async function runAutomationTick(): Promise<TickResult> {
     }
 
     const gap = realityScore - targetComfort
-    const band = 5 + huntBand.tolerance
+    // Savings widens the deadband (tolerates drift); comfort/balanced hold the
+    // tight 5 + tolerance window.
+    const band = 5 + huntBand.tolerance + (mode === "savings" ? SAVINGS_DRIFT_POINTS : 0)
 
     if (nestConnected && coolingMode && thermostat?.coolSetpointF != null) {
       const setpoint = thermostat.coolSetpointF
@@ -485,9 +531,13 @@ export async function runAutomationTick(): Promise<TickResult> {
         }
 
         // gap > band — OVERSHOOTING. We're MORE comfortable than we need to be;
-        // relax toward the nearest band edge and recover energy. This is the
-        // relax direction that was missing — the setpoint goes UP toward the
-        // warm edge (never below the floor).
+        // relax toward the nearest band edge and recover energy. Savings mode
+        // hunts only when comfort falls BELOW the floor (spec), so it skips this
+        // proactive relax and just tolerates the drift.
+        if (mode === "savings") {
+          await maybeHeartbeat(db, "savings — comfort above band, tolerating drift", before)
+          return { ran: false, action: null, detail: "savings drift tolerated" }
+        }
         const desired = setpoint + COMFORT_STEP_F
         const clamp = clampSetpoint(desired, Math.max(minF, SAFETY_FLOOR_F), maxF)
         if (clamp.value === Math.round(setpoint)) {
