@@ -42,12 +42,14 @@ export type FilterHealth = {
   severe: boolean // R > 2.25 — drives the pulsing red flag
 }
 
-// Gauge arc spans load ratio R in [1, 3]. Color bands by R:
+// Gauge arc spans load ratio R in [0, 3]. R=0 is the no-filter baseline (the
+// floor), R=1 is a fresh filter. Color bands by R:
+//   (R 0→1  is the below-fresh reference span — no color)
 //   green  1.0 ≤ R < 1.5   healthy
 //   yellow 1.5 ≤ R < 2.0   loading — plan to change
 //   red    2.0 ≤ R ≤ 2.25  change now
 //   black  R > 2.25        severely restricted
-export const GAUGE_R_MIN = 1
+export const GAUGE_R_MIN = 0
 export const GAUGE_R_MAX = 3
 export const BAND_YELLOW = 1.5
 export const BAND_RED = 2.0
@@ -122,6 +124,14 @@ export function computeFilterHealth(
 export function ratioToArcFraction(r: number): number {
   const t = (r - GAUGE_R_MIN) / (GAUGE_R_MAX - GAUGE_R_MIN)
   return Math.min(1, Math.max(0, t))
+}
+
+// Absolute static (" WC) a given load ratio corresponds to, derived from the
+// calibration baseline. R=0 → floor (no filter), R=1 → fresh filter, and each
+// whole step adds one fresh-filter's worth of drop. Used to label the gauge
+// ticks with real captured values so they move when a recalibration happens.
+export function staticForRatio(baseline: FilterBaseline, r: number): number {
+  return baseline.floor_static_inwc + r * baseline.filter_drop_fresh_inwc
 }
 
 // Validate a two-point capture before storing. Fresh must be strictly above

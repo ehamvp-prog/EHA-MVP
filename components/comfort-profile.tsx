@@ -20,6 +20,9 @@ import {
   History,
   Undo2,
   MoreHorizontal,
+  SlidersHorizontal,
+  PiggyBank,
+  Scale,
 } from "lucide-react"
 import {
   scoreAgainstBand,
@@ -656,11 +659,9 @@ function ComfortRingCard({
 
   return (
     <Card>
-      <CardHeader
-        icon={<Gauge className="h-5 w-5 text-ok" />}
-        title="Your Happy Ring"
-        sub="Pure ASHRAE Standard 55 comfort — your Happy Number vs. your home's live Comfort Score right now."
-      />
+      <CardHeader icon={<Gauge className="h-5 w-5 text-ok" />} title="Your Happy Ring" />
+
+      <AutomationModeToggles />
 
       {!systemRunning ? (
         <p className="mb-3 rounded-lg border border-border bg-elevated px-3 py-2 text-xs text-warn">
@@ -1106,6 +1107,113 @@ function DualGauge({
 }
 
 // ---- Small presentational helpers -----------------------------------------
+
+type ModeTriple = { manual: boolean; comfort: boolean; savings: boolean }
+type ModeResp = { ok: boolean; flags: ModeTriple; mode: string; error?: string }
+
+const BALANCED_TRIPLE: ModeTriple = { manual: false, comfort: true, savings: true }
+
+// Resolve the next toggle state from a tap, enforcing the two hard rules:
+// - Manual is exclusive: selecting it forces Comfort and Savings off.
+// - The state is never empty: turning off the last active mode snaps to Balanced.
+function nextTriple(cur: ModeTriple, target: "manual" | "comfort" | "savings"): ModeTriple {
+  if (target === "manual") {
+    // Re-tapping Manual (the only thing on) would empty the state → Balanced.
+    return cur.manual ? BALANCED_TRIPLE : { manual: true, comfort: false, savings: false }
+  }
+  // Leaving Manual: start from a clean non-manual base, then flip the target.
+  let comfort = cur.manual ? false : cur.comfort
+  let savings = cur.manual ? false : cur.savings
+  if (target === "comfort") comfort = cur.manual ? true : !cur.comfort
+  if (target === "savings") savings = cur.manual ? true : !cur.savings
+  if (!comfort && !savings) return BALANCED_TRIPLE
+  return { manual: false, comfort, savings }
+}
+
+// The three automation toggles that replace the old ASHRAE subtitle. Comfort +
+// Savings together form the Balanced hybrid; Manual stands alone. Writes go
+// through /api/automation/mode, which is backstopped by the DB CHECK constraint.
+function AutomationModeToggles() {
+  const { data } = useSWR<ModeResp>("/api/automation/mode", fetcher)
+  const [optimistic, setOptimistic] = useState<ModeTriple | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  const flags = optimistic ?? data?.flags ?? BALANCED_TRIPLE
+  const balanced = !flags.manual && flags.comfort && flags.savings
+
+  async function choose(target: "manual" | "comfort" | "savings") {
+    const next = nextTriple(flags, target)
+    if (next.manual === flags.manual && next.comfort === flags.comfort && next.savings === flags.savings) {
+      return
+    }
+    setOptimistic(next)
+    setError(null)
+    setSaving(true)
+    try {
+      const res = await fetch("/api/automation/mode", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(next),
+      })
+      const json = (await res.json()) as ModeResp
+      if (!res.ok || !json.ok) {
+        // Surface the DB constraint / server error and revert the optimistic UI.
+        setError(json.error ?? "Couldn't update automation mode.")
+        setOptimistic(null)
+      } else {
+        setOptimistic(null)
+        mutate("/api/automation/mode")
+      }
+    } catch {
+      setError("Network error — automation mode not saved.")
+      setOptimistic(null)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const items = [
+    { key: "manual" as const, label: "Manual", desc: "I run my own system", Icon: SlidersHorizontal, active: flags.manual },
+    { key: "comfort" as const, label: "Comfort", desc: "Hold my Happy Number", Icon: Smile, active: !flags.manual && flags.comfort },
+    { key: "savings" as const, label: "Savings", desc: "Trim cost I won't notice", Icon: PiggyBank, active: !flags.manual && flags.savings },
+  ]
+
+  return (
+    <div className="mb-4">
+      <div className="grid grid-cols-3 gap-2">
+        {items.map(({ key, label, desc, Icon, active }) => (
+          <button
+            key={key}
+            type="button"
+            role="switch"
+            aria-checked={active}
+            aria-label={`${label}: ${desc}`}
+            disabled={saving}
+            onClick={() => choose(key)}
+            className={`flex flex-col items-center gap-1.5 rounded-xl border px-2 py-3 text-center transition-colors disabled:opacity-60 ${
+              active ? "border-primary bg-primary/10" : "border-border bg-elevated hover:border-muted"
+            }`}
+          >
+            <Icon className={`h-4 w-4 ${active ? "text-primary" : "text-muted"}`} aria-hidden="true" />
+            <span className={`text-sm font-semibold ${active ? "text-foreground" : "text-muted"}`}>{label}</span>
+            <span className="text-[11px] font-medium leading-snug tracking-wide text-muted text-pretty">{desc}</span>
+          </button>
+        ))}
+      </div>
+      {balanced ? (
+        <p className="mt-2 flex items-center justify-center gap-1.5 rounded-lg border border-primary/30 bg-primary/5 px-3 py-1.5 text-xs font-medium text-primary">
+          <Scale className="h-3.5 w-3.5" aria-hidden="true" /> Balanced — save where comfort allows
+        </p>
+      ) : null}
+      {error ? (
+        <p className="mt-2 rounded-lg border border-warn/30 bg-warn/5 px-3 py-1.5 text-xs text-warn text-pretty" role="alert">
+          {error}
+        </p>
+      ) : null}
+    </div>
+  )
+}
 
 function Card({ children }: { children: React.ReactNode }) {
   return <div className="rounded-2xl border border-border bg-card p-5 shadow-lg shadow-black/40">{children}</div>

@@ -6,8 +6,10 @@ import { Filter, Flag, RotateCcw, Check, Loader2, AlertTriangle, X } from "lucid
 import {
   computeFilterHealth,
   ratioToArcFraction,
+  staticForRatio,
   validateCapture,
   type FilterBand,
+  type FilterBaseline,
 } from "@/lib/filter/health"
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
@@ -35,10 +37,10 @@ const BAND_HEX: Record<FilterBand, string> = {
 }
 
 // ---- Gauge geometry --------------------------------------------------------
-const W = 230
-const H = 142
+const W = 250
+const H = 168
 const CX = W / 2
-const CY = 122
+const CY = 138
 const R = 96
 
 function polar(angleDeg: number, radius = R) {
@@ -55,12 +57,23 @@ function arc(fracStart: number, fracEnd: number, radius = R) {
   return `M ${s.x.toFixed(2)} ${s.y.toFixed(2)} A ${radius} ${radius} 0 0 1 ${e.x.toFixed(2)} ${e.y.toFixed(2)}`
 }
 
-// Band boundaries expressed as arc fractions (R 1→3 maps to 0→1).
+// Band boundaries expressed as arc fractions (R 1→3 maps to 0.33→1).
 const SEG = [
   { band: "green" as const, from: ratioToArcFraction(1.0), to: ratioToArcFraction(1.5) },
   { band: "yellow" as const, from: ratioToArcFraction(1.5), to: ratioToArcFraction(2.0) },
   { band: "red" as const, from: ratioToArcFraction(2.0), to: ratioToArcFraction(2.25) },
   { band: "black" as const, from: ratioToArcFraction(2.25), to: ratioToArcFraction(3.0) },
+]
+
+// The four labeled ticks on the arc. `r` is the load ratio (its arc position);
+// the static value at each is derived from the live calibration baseline, so
+// these move whenever the filter is recalibrated. `align` steers label anchor:
+// side ticks (R0/R3) sit beside the arc, top ticks (R1/R2) sit above it.
+const TICKS: { r: number; label: string; color: string; align: "start" | "middle" | "end" }[] = [
+  { r: 0, label: "Baseline", color: "#8b93a1", align: "start" },
+  { r: 1, label: "New filter", color: "#29d17e", align: "middle" },
+  { r: 2, label: "Replace soon", color: "#f5b13d", align: "middle" },
+  { r: 3, label: "Restricting", color: "#ef4757", align: "end" },
 ]
 
 function NeedleGauge({
@@ -83,47 +96,51 @@ function NeedleGauge({
       {!calibrated ? (
         <path d={arc(0, 1)} fill="none" stroke="#1d2531" strokeWidth={12} strokeLinecap="round" />
       ) : (
-        SEG.map((s) => (
+        <>
+          {/* Baseline → new-filter span (R0→R1): a dim reference track, since a
+              filter is never "loaded" below fresh. Colors begin at R1. */}
           <path
-            key={s.band}
-            d={arc(s.from, s.to)}
+            d={arc(0, ratioToArcFraction(1))}
             fill="none"
-            stroke={BAND_HEX[s.band]}
+            stroke="#1d2531"
             strokeWidth={12}
-            strokeLinecap="butt"
-            opacity={band === s.band ? 1 : 0.4}
+            strokeLinecap="round"
           />
-        ))
+          {SEG.map((s) => (
+            <path
+              key={s.band}
+              d={arc(s.from, s.to)}
+              fill="none"
+              stroke={BAND_HEX[s.band]}
+              strokeWidth={12}
+              strokeLinecap="butt"
+              opacity={band === s.band ? 1 : 0.4}
+            />
+          ))}
+        </>
       )}
 
-      {/* Divider ticks + labels at load multipliers 1, 2, 3. */}
-      {[1, 2, 3].map((mult) => {
-        const f = ratioToArcFraction(mult)
-        const inner = polar(fracToAngle(f), R - 18)
-        const outer = polar(fracToAngle(f), R + 2)
-        const lbl = polar(fracToAngle(f), R + 16)
-        return (
-          <g key={mult}>
-            <line
-              x1={inner.x}
-              y1={inner.y}
-              x2={outer.x}
-              y2={outer.y}
-              stroke="#5b6573"
-              strokeWidth={2}
-            />
-            <text
-              x={lbl.x}
-              y={lbl.y + 4}
-              textAnchor="middle"
-              className="fill-muted-foreground"
-              style={{ fontSize: 12, fontWeight: 600 }}
-            >
-              {mult}
-            </text>
-          </g>
-        )
-      })}
+      {/* Color-coded ticks: Baseline (R0), New filter (R1), Replace soon (R2),
+          Restricting (R3). Labels/values live in the legend below the arc. */}
+      {calibrated
+        ? TICKS.map((t) => {
+            const f = ratioToArcFraction(t.r)
+            const inner = polar(fracToAngle(f), R - 17)
+            const outer = polar(fracToAngle(f), R + 3)
+            return (
+              <line
+                key={t.r}
+                x1={inner.x}
+                y1={inner.y}
+                x2={outer.x}
+                y2={outer.y}
+                stroke={t.color}
+                strokeWidth={2.5}
+                strokeLinecap="round"
+              />
+            )
+          })
+        : null}
 
       {/* Needle (only when we have a real verdict). */}
       {calibrated && ratio != null ? (
@@ -144,6 +161,28 @@ function NeedleGauge({
         <circle cx={CX} cy={CY} r={5} fill="#3a4453" />
       )}
     </svg>
+  )
+}
+
+// Color-coded key for the four arc ticks. Static values derive from the live
+// calibration baseline (staticForRatio), so they track recalibrations.
+function TickLegend({ baseline }: { baseline: FilterBaseline }) {
+  return (
+    <div className="mt-1 grid grid-cols-2 gap-x-4 gap-y-1.5 border-t border-border pt-3">
+      {TICKS.map((t) => (
+        <div key={t.r} className="flex items-center gap-2">
+          <span
+            className="h-2.5 w-2.5 shrink-0 rounded-full"
+            style={{ backgroundColor: t.color }}
+            aria-hidden
+          />
+          <span className="text-xs font-medium text-foreground">{t.label}</span>
+          <span className="ml-auto font-mono text-[11px] tabular-nums text-muted">
+            {`${staticForRatio(baseline, t.r).toFixed(2)}"`}
+          </span>
+        </div>
+      ))}
+    </div>
   )
 }
 
@@ -400,6 +439,9 @@ export function FilterHealthCard({ staticInWc }: { staticInWc: number | null }) 
           <span className="text-xs font-medium uppercase tracking-wide text-muted">WC static</span>
         </div>
       </div>
+
+      {/* Color-coded reference key for the arc ticks. */}
+      {health.calibrated && baseline ? <TickLegend baseline={baseline} /> : null}
 
       {/* Verdict line. */}
       <div className="mt-3 rounded-xl border border-border bg-elevated p-4 text-center">
