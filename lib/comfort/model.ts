@@ -14,7 +14,7 @@
 // season — NOT on the preferred temp/RH — so it stays stable between captures.
 // ---------------------------------------------------------------------------
 
-import { pmv_ppd_ashrae } from "jsthermalcomfort"
+import { pmvPpdAshrae } from "./pmv"
 
 export const fToC = (f: number) => ((f - 32) * 5) / 9
 
@@ -129,10 +129,10 @@ const velOf = (ctx: ComfortContext) => (ctx.blower_on ? 0.15 : 0.1)
 // returns treated as fully unacceptable.
 function ppdAt(tempF: number, rh: number, inputs: ModelInputs, ctx: ComfortContext): number {
   const ta = fToC(tempF)
-  const r = pmv_ppd_ashrae(ta, ta, velOf(ctx), rh, metOf(inputs), cloForMonth(ctx.month), 0, {
+  const r = pmvPpdAshrae(ta, ta, velOf(ctx), rh, metOf(inputs), cloForMonth(ctx.month), 0, {
     units: "SI",
   })
-  const ppd = typeof r?.ppd === "number" ? r.ppd : Number((r as { ppd?: number })?.ppd)
+  const ppd = typeof r?.ppd === "number" ? r.ppd : Number(r?.ppd)
   return Number.isFinite(ppd) ? ppd : 100
 }
 

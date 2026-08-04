@@ -11,12 +11,9 @@ import {
   NestRateLimitError,
   type NestThermostat,
 } from "@/lib/nest/client"
-import {
-  comfortDetail,
-  comfortFromConditions,
-  clampSetpoint,
-  monthCst,
-} from "@/lib/comfort/ring"
+import { clampSetpoint } from "@/lib/comfort/ring"
+import { comfortContext, deriveBandCached } from "@/lib/comfort/load"
+import { scoreAgainstBand, type ComfortBand, type ModelInputs, coerceConstraint, DEFAULT_MODEL_INPUTS } from "@/lib/comfort/model"
 import {
   RTOU_RATES,
   seasonForMonth,
@@ -61,12 +58,6 @@ const COMFORT_STEP_F = 2
 const CONFIRM_TOLERANCE_F = 1
 
 export type TickResult = { ran: boolean; action: string | null; detail?: string }
-
-type ComfortRow = {
-  preferred_temp_f: number
-  preferred_rh: number
-  activity_level: "sedentary" | "moderate" | "active"
-}
 
 type BeforeState = {
   temp_f: number
@@ -198,8 +189,9 @@ async function maybeHeartbeat(db: Db, detail: string, before: BeforeState): Prom
 async function confirmPending(
   db: Db,
   thermostat: NestThermostat | null,
-  comfort: ComfortRow,
-  month: number,
+  inputs: ModelInputs,
+  band: ComfortBand,
+  ctx: { month: number; blower_on: boolean; night: boolean },
 ): Promise<void> {
   if (!thermostat) return
   const { data: pending } = await db
@@ -223,7 +215,7 @@ async function confirmPending(
 
   const afterComfort =
     thermostat.ambientTempF != null && thermostat.humidity != null
-      ? comfortDetail(thermostat.ambientTempF, thermostat.humidity, comfort, month).comfort
+      ? scoreAgainstBand(thermostat.ambientTempF, thermostat.humidity, band, inputs, ctx).score
       : null
   const beforeComfort = (pending.before_state as BeforeState | null)?.comfort_score ?? null
 
@@ -246,9 +238,11 @@ async function confirmPending(
 export async function runAutomationTick(): Promise<TickResult> {
   const db = createAdminClient()
 
-  const [{ data: sys }, { data: comfortRaw }] = await Promise.all([
+  const [{ data: sys }, { data: comfortRaw }, inputsRes, constraintsRes] = await Promise.all([
     db.from("system_profile").select("*").eq("site_id", SITE_ID).maybeSingle(),
     db.from("comfort_profile").select("*").eq("site_id", SITE_ID).maybeSingle(),
+    db.rpc("comfort_model_inputs", { p_site_id: SITE_ID }),
+    db.rpc("comfort_band_constraints", { p_site_id: SITE_ID }),
   ])
 
   const autoComfort = !!sys?.auto_comfort_enabled
@@ -256,10 +250,26 @@ export async function runAutomationTick(): Promise<TickResult> {
   if (!autoComfort && !peakDodger) return { ran: false, action: null, detail: "no automations enabled" }
   if (!comfortRaw) return { ran: false, action: null, detail: "no comfort profile" }
 
-  const comfort: ComfortRow = {
-    preferred_temp_f: Number(comfortRaw.preferred_temp_f ?? 72),
-    preferred_rh: Number(comfortRaw.preferred_rh ?? 45),
-    activity_level: (comfortRaw.activity_level as ComfortRow["activity_level"]) ?? "moderate",
+  // Build the unified model inputs (numbers may arrive as strings) + resolved
+  // constraint rows. The DB is the source of truth for constraints.
+  const blob = (inputsRes.data ?? null) as Record<string, unknown> | null
+  const num = (v: unknown, d: number) => {
+    const n = v == null ? NaN : Number(v)
+    return Number.isFinite(n) ? n : d
+  }
+  const arr = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : [])
+  const constraintRows = (constraintsRes.error ? [] : (constraintsRes.data ?? [])) as unknown[]
+  const inputs: ModelInputs = {
+    met_base: num(blob?.met_base, DEFAULT_MODEL_INPUTS.met_base),
+    met_adjust: num(blob?.met_adjust, 0),
+    tolerance: num(blob?.tolerance, DEFAULT_MODEL_INPUTS.tolerance),
+    occupants: arr(blob?.occupants).length ? arr(blob?.occupants) : DEFAULT_MODEL_INPUTS.occupants,
+    health_considerations: arr(blob?.health_considerations),
+    preferred_temp_f: num(blob?.preferred_temp_f ?? comfortRaw.preferred_temp_f, 72),
+    preferred_rh: num(blob?.preferred_rh ?? comfortRaw.preferred_rh, 45),
+    activity_level: String(blob?.activity_level ?? comfortRaw.activity_level ?? "moderate"),
+    household_size: num(blob?.household_size ?? comfortRaw.household_size, 2),
+    constraints: constraintRows.map((r) => coerceConstraint(r as Record<string, unknown>)),
   }
 
   // Safety band + tuning (hard clamp bounds).
@@ -296,21 +306,33 @@ export async function runAutomationTick(): Promise<TickResult> {
   const realityTempF = nestLive ? thermostat!.ambientTempF! : sensorTemp
   const realityRh = nestLive ? thermostat!.humidity! : sensorRh
 
+  // Two contexts: BASELINE (sleep overlay excluded) is what the displayed
+  // Happy Number and the Comfort Score are measured against, so the number
+  // stays comparable across the whole day. HUNT folds in the 22:00-06:00 sleep
+  // overlay so the engine aims at the narrowed night band during those hours.
+  const blowerOn = thermostat?.fanMode === "ON" || thermostat?.hvacStatus === "COOLING"
+  const huntCtx = comfortContext({ blowerOn })
+  const baseCtx = { ...huntCtx, night: false }
+  const baseBand = deriveBandCached(inputs, baseCtx)
+  const huntBand = huntCtx.night ? deriveBandCached(inputs, huntCtx) : baseBand
+
   // Always try to confirm a pending command, even if we take no new action.
-  const month = monthCst()
-  await confirmPending(db, thermostat, comfort, month)
+  await confirmPending(db, thermostat, inputs, baseBand, baseCtx)
 
   if (realityTempF == null || realityRh == null) {
     return { ran: false, action: null, detail: "no reality reading" }
   }
 
-  const realityDetail = comfortDetail(realityTempF, realityRh, comfort, month)
-  const targetComfort = comfortFromConditions(comfort.preferred_temp_f, comfort.preferred_rh, comfort, month)
+  // Comfort Score is ALWAYS against the baseline band (comparable all day).
+  const reality = scoreAgainstBand(realityTempF, realityRh, baseBand, inputs, baseCtx)
+  const realityScore = reality.score
+  // The displayed Happy Number is the baseline band's fingerprint.
+  const targetComfort = baseBand.happyNumber
   const before: BeforeState = {
     temp_f: realityTempF,
     rh: realityRh,
     setpoint_f: thermostat?.coolSetpointF ?? null,
-    comfort_score: realityDetail.comfort,
+    comfort_score: realityScore,
   }
 
   const lastAct = await lastActuationTime(db)
@@ -388,13 +410,20 @@ export async function runAutomationTick(): Promise<TickResult> {
   }
 
   // ---- Automation 1: Automatic Comfort Adjustment --------------------------
-  if (autoComfort && realityDetail.comfort <= targetComfort - COMFORT_TRIGGER_GAP) {
+  if (autoComfort && realityScore <= targetComfort - COMFORT_TRIGGER_GAP) {
     if (nestConnected && coolingMode && thermostat?.coolSetpointF != null) {
       if (!inCooldown) {
-        // Is humidity the dominant driver? (counterfactual comfort gain)
-        const fixTemp = comfortFromConditions(comfort.preferred_temp_f, realityRh, comfort, month)
-        const fixRh = comfortFromConditions(realityTempF, comfort.preferred_rh, comfort, month)
-        const humidityDominant = fixRh - realityDetail.comfort > fixTemp - realityDetail.comfort
+        // Hunt toward the HUNT band centroid (night overlay folded in during
+        // 22:00-06:00). The band is two-sided, so the centroid — not the raw
+        // preferred temp — is the setpoint we aim at.
+        const targetTempF = huntBand.centroidTempF
+        const targetRh = huntBand.centroidRh
+
+        // Is humidity the dominant driver? Counterfactual score gain from
+        // fixing ONLY humidity vs ONLY temperature to the band centroid.
+        const fixTemp = scoreAgainstBand(targetTempF, realityRh, huntBand, inputs, huntCtx).score
+        const fixRh = scoreAgainstBand(realityTempF, targetRh, huntBand, inputs, huntCtx).score
+        const humidityDominant = fixRh - realityScore > fixTemp - realityScore
 
         if (humidityDominant && fanEnabled) {
           await applyControl(token!, { fanMode: "ON" })
@@ -409,8 +438,10 @@ export async function runAutomationTick(): Promise<TickResult> {
           return { ran: true, action: "fan_circulate" }
         }
 
-        // PMV>0 = too warm → lower cool setpoint; PMV<0 = too cool → raise.
-        const tooWarm = realityDetail.pmv > 0
+        // Two-sided: if reality sits ABOVE the band centroid it's too warm →
+        // lower the cool setpoint; if BELOW, too cool → raise it. Nudge one
+        // step in the direction of the centroid (the clamp enforces the band).
+        const tooWarm = realityTempF > targetTempF
         const desired = tooWarm
           ? thermostat.coolSetpointF - COMFORT_STEP_F
           : thermostat.coolSetpointF + COMFORT_STEP_F
@@ -447,7 +478,7 @@ export async function runAutomationTick(): Promise<TickResult> {
       const wrote = await maybeRecommend(
         db,
         "comfort_adjust",
-        `Your home is below your comfort target. Setting your thermostat toward ${Math.round(comfort.preferred_temp_f)}°F would help.`,
+        `Your home is below your comfort target. Setting your thermostat toward ${Math.round(huntBand.centroidTempF)}°F would help.`,
         before,
       )
       if (wrote) return { ran: true, action: "recommendation" }
