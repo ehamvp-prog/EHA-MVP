@@ -2,6 +2,7 @@
 
 import useSWR from "swr"
 import { PiggyBank } from "lucide-react"
+import { AutomationJournalCard } from "@/components/automation-journal"
 import {
   useChartRange,
   ChartControls,
@@ -118,6 +119,10 @@ export function SavingsSection() {
                 since they tell different stories and free cooling is now the
                 largest single source. */}
             <BucketBreakdown buckets={data.buckets ?? []} net={totals.net} />
+
+            {/* Automation journal — slim, borderless toggle at the very bottom;
+                the per-event story behind the savings above. */}
+            <AutomationJournalCard embedded />
           </>
         )}
       </div>

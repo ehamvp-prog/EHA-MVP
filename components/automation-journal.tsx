@@ -118,7 +118,10 @@ function mergeFreeCooling(items: DisplayItem[], events: SavingsEvent[]): Display
 }
 
 // Only render once the homeowner has automation history worth reviewing.
-export function AutomationJournalCard() {
+// `embedded` renders a slim, borderless toggle meant to live at the bottom of
+// another card (the savings section) — no outer card chrome, no "Measured
+// savings" badge, since the host card already owns the money story.
+export function AutomationJournalCard({ embedded = false }: { embedded?: boolean }) {
   const { data } = useSWR<{ ok: boolean; entries: JournalEntry[] }>(
     "/api/automation/journal",
     fetcher,
@@ -163,6 +166,73 @@ export function AutomationJournalCard() {
   const safePage = Math.min(page, pageCount - 1)
   const visible = items.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE)
 
+  // Shared expandable body: the entry list, pager, and background note.
+  const body = collapsed ? null : (
+    <>
+      <ul className="mt-3 flex flex-col gap-2">
+        {visible.map((item) =>
+          item.kind === "steady" ? (
+            <SteadyRow key={item.id} item={item} />
+          ) : item.kind === "freecooling" ? (
+            <FreeCoolingRow key={item.id} event={item.event} />
+          ) : (
+            <JournalRow key={item.entry.id} entry={item.entry} event={eventById.get(item.entry.id)} />
+          ),
+        )}
+      </ul>
+
+      {pageCount > 1 ? (
+        <div className="mt-3 flex items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => setPage((p) => Math.max(0, p - 1))}
+            disabled={safePage === 0}
+            className="flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <ChevronLeft className="h-3.5 w-3.5" /> Newer
+          </button>
+          <span className="text-[11px] tabular-nums text-muted">
+            Page {safePage + 1} of {pageCount}
+          </span>
+          <button
+            type="button"
+            onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+            disabled={safePage >= pageCount - 1}
+            className="flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Older <ChevronRight className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      ) : null}
+
+      <p className="mt-3 flex items-center justify-center gap-1.5 text-center text-[11px] text-muted">
+        <ShieldCheck className="h-3 w-3 shrink-0" />
+        Automation runs automatically in the background — even when this app is closed.
+      </p>
+    </>
+  )
+
+  // Embedded: a slim, borderless toggle at the bottom of the host card. No card
+  // chrome and no measured-savings badge — the savings section already shows
+  // the money. Just a quiet "Automation Journal" affordance.
+  if (embedded) {
+    return (
+      <div className="mt-4 border-t border-border pt-3">
+        <button
+          type="button"
+          onClick={() => setCollapsed((v) => !v)}
+          aria-expanded={!collapsed}
+          className="flex w-full items-center justify-center gap-1.5 py-1 text-xs font-medium text-muted transition-colors hover:text-foreground"
+        >
+          <History className="h-3.5 w-3.5" />
+          Automation Journal
+          <ChevronDown className={`h-3.5 w-3.5 transition-transform ${collapsed ? "" : "rotate-180"}`} />
+        </button>
+        {body}
+      </div>
+    )
+  }
+
   return (
     <div className="rounded-2xl border border-border bg-card p-5 shadow-lg shadow-black/40">
       <div className="flex items-center justify-between gap-3">
@@ -199,50 +269,7 @@ export function AutomationJournalCard() {
         ) : null}
       </div>
 
-      {collapsed ? null : (
-        <>
-          <ul className="mt-3 flex flex-col gap-2">
-            {visible.map((item) =>
-              item.kind === "steady" ? (
-                <SteadyRow key={item.id} item={item} />
-              ) : item.kind === "freecooling" ? (
-                <FreeCoolingRow key={item.id} event={item.event} />
-              ) : (
-                <JournalRow key={item.entry.id} entry={item.entry} event={eventById.get(item.entry.id)} />
-              ),
-            )}
-          </ul>
-
-          {pageCount > 1 ? (
-            <div className="mt-3 flex items-center justify-between gap-2">
-          <button
-            type="button"
-            onClick={() => setPage((p) => Math.max(0, p - 1))}
-            disabled={safePage === 0}
-            className="flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <ChevronLeft className="h-3.5 w-3.5" /> Newer
-          </button>
-          <span className="text-[11px] tabular-nums text-muted">
-            Page {safePage + 1} of {pageCount}
-          </span>
-          <button
-            type="button"
-            onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
-            disabled={safePage >= pageCount - 1}
-            className="flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            Older <ChevronRight className="h-3.5 w-3.5" />
-          </button>
-        </div>
-          ) : null}
-
-          <p className="mt-3 flex items-center justify-center gap-1.5 text-center text-[11px] text-muted">
-            <ShieldCheck className="h-3 w-3 shrink-0" />
-            Automation runs automatically in the background — even when this app is closed.
-          </p>
-        </>
-      )}
+      {body}
     </div>
   )
 }

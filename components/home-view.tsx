@@ -5,7 +5,6 @@ import useSWR from "swr"
 import { DollarSign, Thermometer, Sun, Home as HomeIcon, Smile, RefreshCw } from "lucide-react"
 import { ComfortProfilePanel, HappyNumberPanel } from "./comfort-profile"
 import { NestCard } from "./nest-card"
-import { AutomationJournalCard } from "./automation-journal"
 import { SavingsSection } from "./savings-section"
 import { ComfortChart } from "./comfort-chart"
 import { EfficiencyChart } from "./efficiency-chart"
@@ -141,12 +140,9 @@ export function HomeView() {
             systemRunning={!!c?.system_running}
           />
 
-          {/* 2. Savings — measured value, kept high while attention is fresh */}
+          {/* 2. Savings — measured value, kept high while attention is fresh.
+              The Automation Journal now lives inside this card, at its bottom. */}
           <SavingsSection />
-
-          {/* Automation journal — sits directly under savings, since its entries
-              (free cooling, comfort adjustments, coasting) explain that value */}
-          <AutomationJournalCard />
 
       {/* 3. What you're spending — real dollars against real TOU rates */}
       <div className="rounded-2xl border border-border bg-card p-5 shadow-lg shadow-black/40">
