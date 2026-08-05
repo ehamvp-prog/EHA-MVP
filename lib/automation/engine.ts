@@ -553,10 +553,17 @@ export async function runAutomationTick(): Promise<TickResult> {
     const deadbandF = 1 + (mode === "savings" ? 1 : 0)
     const offNumber = Math.abs(gap) > tolerance || Math.abs(tempError) > deadbandF
 
-    // §6.2 dominant factor — which lever recovers more comfort, temp or RH?
-    const recoveryTemp = scoreAgainstBand(targetTempF, realityRh, huntBand, huntInputs, huntCtx).score - huntScore
-    const recoveryRh = scoreAgainstBand(realityTempF, targetRh, huntBand, huntInputs, huntCtx).score - huntScore
-    const humidityDominant = recoveryRh > recoveryTemp && realityRh > targetRh
+    // §6.2 dominant factor — which axis is further off ITS target, measured as
+    // physical error on a common scale (°F vs %RH normalized by their comfort
+    // half-widths ~3°F / ~10%RH). NOTE: we must NOT use scoreAgainstBand here —
+    // under the §3.2 curve that score is MINIMIZED at target and rises with
+    // distance toward the typical reference, so a "recovery toward target" reads
+    // as negative. Distance-from-target is the correct, curve-independent signal.
+    const tempOff = Math.abs(tempError) / 3
+    const rhOff = Math.abs(realityRh - targetRh) / 10
+    // Humidity only "wins" when it is the larger deficit AND the room is actually
+    // too humid (over-dry is not something cooling/overcool can fix).
+    const humidityDominant = rhOff > tempOff && realityRh > targetRh
     const dominantFactor = humidityDominant ? "humidity" : "temperature"
 
     // §6.5 journal payload — the same fields every tick so a wrong target is

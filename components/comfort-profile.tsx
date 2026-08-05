@@ -342,7 +342,8 @@ export function ComfortProfilePanel() {
             <div>
               <p className="text-sm font-semibold text-foreground">Your Happy Number</p>
               <p className="text-xs text-muted-foreground text-pretty">
-                Calculated from these preferences using ASHRAE Standard 55.
+                How specific your household&apos;s ideal climate is — from your preferences and health needs
+                against an ASHRAE Standard 55 comfort envelope.
               </p>
             </div>
           </div>
