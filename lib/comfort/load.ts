@@ -99,7 +99,9 @@ function bandKey(inputs: ModelInputs, ctx: ComfortContext): string {
     .map((c) => `${c.constraint_name}:${c.applies}:${c.min_temp_f},${c.max_temp_f},${c.min_rh},${c.max_rh}`)
     .sort()
     .join("|")
-  return `${inputs.met_base + inputs.met_adjust}|${ctx.month}|${ctx.blower_on}|${ctx.night ? 1 : 0}|${cs}`
+  // preferred_temp_f/rh are part of the key because the Happy Number is now
+  // score(preferred) (spec v2.1 §3) — changing preference must bust the cache.
+  return `${inputs.met_base + inputs.met_adjust}|${ctx.month}|${ctx.blower_on}|${ctx.night ? 1 : 0}|${inputs.preferred_temp_f},${inputs.preferred_rh}|${cs}`
 }
 
 export function deriveBandCached(inputs: ModelInputs, ctx: ComfortContext): ComfortBand {

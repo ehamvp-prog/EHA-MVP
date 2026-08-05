@@ -71,8 +71,11 @@ export async function GET(request: Request) {
           tHi: band.tHi,
           rhLo: band.rhLo,
           rhHi: band.rhHi,
-          centroidTempF: band.centroidTempF,
-          centroidRh: band.centroidRh,
+          // The suggested setpoint is now the household's PREFERRED temperature
+          // (spec v2.1 §5), not a band center. Sent under the same key so the
+          // client's "suggested setpoint" display keeps working.
+          targetTempF: model.inputs.preferred_temp_f,
+          targetRh: model.inputs.preferred_rh,
           empty: band.empty,
           dropped: band.dropped.map((d) => d.trigger_source || d.constraint_name),
           tolerance: band.tolerance,

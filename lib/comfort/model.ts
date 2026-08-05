@@ -6,12 +6,15 @@
 // the database resolves for us (comfort_model_inputs / comfort_band_constraints
 // RPCs). We NEVER re-derive constraints here — the DB is the source of truth.
 //
-//   Happy Number  = deriveBand(profile, context).happyNumber   (a fingerprint)
-//   Comfort Score = elevateComfort(actual_temp, actual_rh, …).score
+//   Happy Number  = score(preferred_temp_f, preferred_rh, …)   (the target's score)
+//   Comfort Score = score(actual_temp,      actual_rh,     …)  (reality's score)
 //
-// Same band, same profile, same context — only the conditions differ. The band
-// (and therefore the Happy Number) depends on activity, occupants, health, and
-// season — NOT on the preferred temp/RH — so it stays stable between captures.
+// ONE PPD-based scoring function (spec v2.1 §3) drives both numbers; they differ
+// only in the conditions fed in, which is what makes the comparison valid. The
+// band GEOMETRY (accepted points, health constraints) depends on activity,
+// occupants, health, and season — NOT on the preferred temp/RH. The Happy Number
+// DOES depend on the preferred conditions, because it is simply the score the
+// household earns at their own stated target.
 // ---------------------------------------------------------------------------
 
 import { pmvPpdAshrae } from "./pmv"
@@ -28,13 +31,6 @@ const T_STEP = 1
 const RH_LO = 20
 const RH_HI = 70
 const RH_STEP = 2
-
-// Centrality reference point + normalization scales (the ONLY normalization the
-// spec pins down, reused everywhere for internal consistency).
-const REF_T = 73
-const REF_RH = 45
-const T_SCALE = 12
-const RH_SCALE = 25
 
 export type ConstraintApplies = "baseline" | "night_overlay_2200_0600"
 
@@ -78,20 +74,15 @@ export type ComfortBand = {
   happyNumber: number
   bandPoints: number
   envelopePoints: number
-  widthComponent: number
-  centrality: number
-  centroidTempF: number
-  centroidRh: number
   tLo: number
   tHi: number
   rhLo: number
   rhHi: number
-  maxRadius: number
   empty: boolean // constraints were irreconcilable → relaxation kicked in
   dropped: Constraint[] // constraints relaxed to recover a non-empty band
   active: Constraint[] // constraints actually enforced in this band
   tolerance: number
-  points: { t: number; rh: number }[] // acceptable grid points (for scoring)
+  points: { t: number; rh: number }[] // acceptable grid points (for the slice)
 }
 
 export type ElevateResult = {
@@ -136,6 +127,26 @@ function ppdAt(tempF: number, rh: number, inputs: ModelInputs, ctx: ComfortConte
   return Number.isFinite(ppd) ? ppd : 100
 }
 
+// Comfort score 0-100 from PPD alone (spec v2.1 §3). ASHRAE PPD bottoms out near
+// 5% even in a thermally perfect room, so scoring `100 - PPD` directly would cap
+// the scale at 95. Rescaling by /95 (i.e. /(100 - PPD_FLOOR)) makes a perfect
+// room read exactly 100 and lets the full 0-100 range be reached in both
+// directions. This is the ONE function behind BOTH the Happy Number (fed the
+// preferred conditions) and the Comfort Score (fed live conditions). It depends
+// only on the conditions and the household's physiological inputs — never on the
+// band geometry or any learned anchor.
+const PPD_FLOOR = 5
+export function comfortScore(
+  tempF: number,
+  rh: number,
+  inputs: ModelInputs,
+  ctx: ComfortContext,
+): number {
+  const ppd = ppdAt(tempF, rh, inputs, ctx)
+  const raw = (100 * (100 - ppd)) / (100 - PPD_FLOOR)
+  return Math.max(0, Math.min(100, Math.round(raw)))
+}
+
 // A constraint REMOVES points in a region; a point "passes" if it's not removed.
 function passesConstraint(tempF: number, rh: number, c: Constraint): boolean {
   if (c.min_temp_f != null && tempF < c.min_temp_f) return false
@@ -144,8 +155,6 @@ function passesConstraint(tempF: number, rh: number, c: Constraint): boolean {
   if (c.max_rh != null && rh > c.max_rh) return false
   return true
 }
-
-const norm = (dt: number, drh: number) => Math.sqrt((dt / T_SCALE) ** 2 + (drh / RH_SCALE) ** 2)
 
 // Coerce a raw RPC constraint row (which may arrive with string numerics) into
 // a typed Constraint.
@@ -248,38 +257,20 @@ export function deriveBand(inputs: ModelInputs, ctx: ComfortContext): ComfortBan
     s = sweep(inputs, ctx, working)
   }
 
-  const envelope = Math.max(1, s.envelope)
-  const widthComponent = s.band > 0 ? (100 * s.band) / envelope : 0
-  const centroidTempF = s.band > 0 ? s.tSum / s.band : inputs.preferred_temp_f
-  const centroidRh = s.band > 0 ? s.rSum / s.band : inputs.preferred_rh
-  const distance = norm(centroidTempF - REF_T, centroidRh - REF_RH)
-  const centrality = 100 * Math.max(0, 1 - distance)
-
-  let happyNumber = s.band > 0 ? Math.round(0.6 * widthComponent + 0.4 * centrality) : 1
-  happyNumber = Math.max(1, Math.min(100, happyNumber))
-  if (wasEmpty) happyNumber = Math.min(happyNumber, 25) // unresolvable → highly specific
-
-  // Scoring scale: farthest acceptable point from the centroid (normalized),
-  // floored so a one-point band doesn't divide by ~0.
-  let maxRadius = 0.15
-  for (const p of s.points) {
-    const d = norm(p.t - centroidTempF, p.rh - centroidRh)
-    if (d > maxRadius) maxRadius = d
-  }
+  // Happy Number (spec v2.1 §3): the comfort score the household earns at their
+  // OWN stated preferred conditions. Not a specificity measure, not a band-center
+  // distance, not an anchor — just score(preferred) under the same function that
+  // scores live reality, so the two numbers are directly comparable.
+  const happyNumber = comfortScore(inputs.preferred_temp_f, inputs.preferred_rh, inputs, ctx)
 
   return {
     happyNumber,
     bandPoints: s.band,
     envelopePoints: s.envelope,
-    widthComponent: Math.round(widthComponent * 10) / 10,
-    centrality: Math.round(centrality * 10) / 10,
-    centroidTempF: Math.round(centroidTempF * 10) / 10,
-    centroidRh: Math.round(centroidRh * 10) / 10,
     tLo: s.band > 0 ? s.tLo : inputs.preferred_temp_f,
     tHi: s.band > 0 ? s.tHi : inputs.preferred_temp_f,
     rhLo: s.band > 0 ? s.rhLo : inputs.preferred_rh,
     rhHi: s.band > 0 ? s.rhHi : inputs.preferred_rh,
-    maxRadius,
     empty: wasEmpty,
     dropped,
     active: working,
@@ -376,29 +367,86 @@ export function scoreAgainstBand(
   inputs: ModelInputs,
   ctx: ComfortContext,
 ): { score: number; factors: ComfortFactor[] } {
-  const happy = band.happyNumber
+  // The number is pure PPD (spec v2.1 §3) — the SAME function that produced the
+  // Happy Number, so Comfort Score and Happy Number are directly comparable. The
+  // band is used ONLY to explain the score (which health constraint binds, if
+  // any), never to shape the number. No band-center anchor, no distance falloff.
   const passes = band.active.every((c) => passesConstraint(tempF, rh, c))
   const thermalOk = ppdAt(tempF, rh, inputs, ctx) <= PPD_ACCEPTABLE
   const inside = band.bandPoints > 0 && passes && thermalOk
-
-  let score: number
-  if (inside) {
-    const dCentroid = norm(tempF - band.centroidTempF, rh - band.centroidRh)
-    const dNorm = Math.max(0, Math.min(1, dCentroid / band.maxRadius))
-    score = happy + (100 - happy) * (1 - dNorm) * 0.35
-  } else {
-    let edge = Infinity
-    for (const p of band.points) {
-      const d = norm(tempF - p.t, rh - p.rh)
-      if (d < edge) edge = d
-    }
-    if (!Number.isFinite(edge)) edge = 2
-    score = happy * Math.exp(-1.2 * edge)
-  }
   return {
-    score: Math.max(1, Math.min(100, Math.round(score))),
+    score: comfortScore(tempF, rh, inputs, ctx),
     factors: buildFactors(tempF, rh, band, inside),
   }
+}
+
+// Conditional temperature slice at the RH nearest to `atRh` (spec v2.1 §4.1).
+// The raw projection tLo..tHi spans EVERY humidity, so it overstates what is
+// admissible: the widest temperatures are only acceptable at extreme RH. The
+// engine must clamp against the slice at the humidity the home is ACTUALLY at.
+export function sliceAtRh(band: ComfortBand, atRh: number): { tLo: number; tHi: number } | null {
+  if (!band.points.length) return null
+  let nearestRh = band.points[0].rh
+  let bestD = Infinity
+  for (const p of band.points) {
+    const d = Math.abs(p.rh - atRh)
+    if (d < bestD) {
+      bestD = d
+      nearestRh = p.rh
+    }
+  }
+  let tLo = Infinity
+  let tHi = -Infinity
+  for (const p of band.points) {
+    if (p.rh !== nearestRh) continue
+    if (p.t < tLo) tLo = p.t
+    if (p.t > tHi) tHi = p.t
+  }
+  return Number.isFinite(tLo) ? { tLo, tHi } : null
+}
+
+export type TargetSelection = {
+  targetTempF: number
+  targetRh: number
+  tempClampedBy: "floor" | "ceiling" | null
+  rhClampedBy: "floor" | "ceiling" | null
+  slice: { tLo: number; tHi: number } | null
+}
+
+// Target selection (spec v2.1 §5). Preference WINS whenever admissible; we clamp
+// ONLY against health-derived limits — the conditional temperature slice at the
+  // current humidity, and the RH band. The band center is never used. When a clamp
+// fires the caller surfaces it in plain language.
+export function selectTarget(band: ComfortBand, inputs: ModelInputs, atRh: number): TargetSelection {
+  const slice = sliceAtRh(band, atRh)
+  const prefT = inputs.preferred_temp_f
+  const prefRh = inputs.preferred_rh
+
+  let targetTempF = prefT
+  let tempClampedBy: "floor" | "ceiling" | null = null
+  if (slice) {
+    if (prefT < slice.tLo) {
+      targetTempF = slice.tLo
+      tempClampedBy = "floor"
+    } else if (prefT > slice.tHi) {
+      targetTempF = slice.tHi
+      tempClampedBy = "ceiling"
+    }
+  }
+
+  let targetRh = prefRh
+  let rhClampedBy: "floor" | "ceiling" | null = null
+  if (band.bandPoints > 0) {
+    if (prefRh < band.rhLo) {
+      targetRh = band.rhLo
+      rhClampedBy = "floor"
+    } else if (prefRh > band.rhHi) {
+      targetRh = band.rhHi
+      rhClampedBy = "ceiling"
+    }
+  }
+
+  return { targetTempF, targetRh, tempClampedBy, rhClampedBy, slice }
 }
 
 // The one canonical entry point: derive the band and score a point in one call.
