@@ -26,6 +26,7 @@ import {
 } from "lucide-react"
 import {
   scoreAgainstBand,
+  selectTarget,
   type ComfortBand,
   type ModelInputs,
   type ComfortFactor,
@@ -64,8 +65,8 @@ type ProfileModel = {
     tHi: number
     rhLo: number
     rhHi: number
-    centroidTempF: number
-    centroidRh: number
+    targetTempF: number
+    targetRh: number
     empty: boolean
     dropped: string[]
     tolerance: number
@@ -176,10 +177,11 @@ function buildGap(
       ? `Your home reads ${Math.round(realityTempF)}°F / ${Math.round(realityRh)}% — ${binding[0].label}.`
       : `Your home is ${gap} points below your Happy Number of ${band.happyNumber}.`
 
-  // Nudge toward the band centroid temp; the engine hunts the same way.
+  // Suggest the household's PREFERRED temperature, clamped to the slice at the
+  // current humidity — the exact target the engine drives to (spec v2.1 §5).
   const suggestedSetpointF =
     primary === "temperature" || (primary === "none" && !withinRange)
-      ? Math.round(band.centroidTempF)
+      ? Math.round(selectTarget(band, inputs, realityRh).targetTempF)
       : null
   const fanWouldHelp = primary === "humidity"
 
