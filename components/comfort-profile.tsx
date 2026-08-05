@@ -23,6 +23,7 @@ import {
   SlidersHorizontal,
   PiggyBank,
   Scale,
+  Moon,
 } from "lucide-react"
 import {
   scoreAgainstBand,
@@ -31,6 +32,8 @@ import {
   type ModelInputs,
   type ComfortFactor,
   type ComfortContext,
+  type TargetSelection,
+  type Constraint,
 } from "@/lib/comfort/model"
 import { type Capture } from "@/lib/comfort/ring"
 
@@ -49,6 +52,10 @@ type ProfileRow = {
   household_size: number
   health_considerations: string[]
   anchor_set_at: string | null
+  sleep_enabled: boolean
+  sleep_start: string
+  sleep_end: string
+  sleep_target_f: number
 }
 
 // The derived model the server ships alongside the profile. Everything the ring
@@ -83,6 +90,10 @@ const DEFAULT_PROFILE: ProfileRow = {
   household_size: 2,
   health_considerations: [],
   anchor_set_at: null,
+  sleep_enabled: true,
+  sleep_start: "22:00",
+  sleep_end: "06:00",
+  sleep_target_f: 72,
 }
 
 const OCCUPANT_OPTIONS: { value: Occupant; label: string; sub: string }[] = [
@@ -226,10 +237,21 @@ export function ComfortProfilePanel() {
     (Math.round(form.preferred_temp_f) !== Math.round(data.profile.preferred_temp_f) ||
       Math.round(form.preferred_rh) !== Math.round(data.profile.preferred_rh))
 
-  // Hydrate the form once the saved profile loads.
+  // Hydrate the form once the saved profile loads. Postgres `time` comes back as
+  // "HH:MM:SS"; the time inputs want "HH:MM". sleep_target defaults to the
+  // preferred temperature (spec v2.3 §8.2) when the row predates the column.
   useEffect(() => {
     if (data?.profile && !dirty) {
-      setForm({ ...DEFAULT_PROFILE, ...data.profile, health_considerations: data.profile.health_considerations ?? [] })
+      const p = data.profile
+      setForm({
+        ...DEFAULT_PROFILE,
+        ...p,
+        health_considerations: p.health_considerations ?? [],
+        sleep_enabled: p.sleep_enabled ?? true,
+        sleep_start: String(p.sleep_start ?? "22:00").slice(0, 5),
+        sleep_end: String(p.sleep_end ?? "06:00").slice(0, 5),
+        sleep_target_f: p.sleep_target_f ?? p.preferred_temp_f ?? 72,
+      })
     }
   }, [data, dirty])
 
@@ -428,6 +450,68 @@ export function ComfortProfilePanel() {
             None
           </PillButton>
         </div>
+      </Card>
+
+      {/* Sleep Schedule (spec v2.3 §8) */}
+      <Card>
+        <CardHeader
+          icon={<Moon className="h-5 w-5 text-primary" />}
+          title="Sleep Schedule"
+          sub="Overnight we target your sleep temperature instead of your daytime preference"
+        />
+        <label className="flex items-center justify-between gap-3 rounded-xl border border-border bg-elevated px-4 py-3">
+          <div>
+            <p className="text-sm font-semibold text-foreground">Enable sleep schedule</p>
+            <p className="text-xs text-muted">When off, your daytime target runs 24/7.</p>
+          </div>
+          <input
+            type="checkbox"
+            checked={form.sleep_enabled}
+            onChange={(e) => set("sleep_enabled", e.target.checked)}
+            className="h-5 w-5 accent-primary"
+            aria-label="Enable sleep schedule"
+          />
+        </label>
+
+        {form.sleep_enabled ? (
+          <>
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <div>
+                <FieldLabel icon={<Moon className="h-4 w-4 text-muted" />}>Sleep starts</FieldLabel>
+                <input
+                  type="time"
+                  value={form.sleep_start}
+                  onChange={(e) => set("sleep_start", e.target.value)}
+                  className="w-full rounded-xl border border-border bg-elevated px-3 py-2.5 text-sm text-foreground [color-scheme:dark]"
+                />
+              </div>
+              <div>
+                <FieldLabel icon={<Thermometer className="h-4 w-4 text-muted" />}>Wake up</FieldLabel>
+                <input
+                  type="time"
+                  value={form.sleep_end}
+                  onChange={(e) => set("sleep_end", e.target.value)}
+                  className="w-full rounded-xl border border-border bg-elevated px-3 py-2.5 text-sm text-foreground [color-scheme:dark]"
+                />
+              </div>
+            </div>
+            <SliderRow
+              icon={<Thermometer className="h-4 w-4 text-muted" />}
+              label="Sleep Temperature"
+              value={`${Math.round(form.sleep_target_f)}°F`}
+              min={60}
+              max={78}
+              step={1}
+              val={form.sleep_target_f}
+              onChange={(v) => set("sleep_target_f", v)}
+              ticks={["60°F (Cool)", "68°F", "78°F (Warm)"]}
+            />
+            <p className="mt-1 text-xs text-muted text-pretty">
+              Defaults to your daytime preference. Set it lower for a cooler night — we&apos;ll drive to it during
+              your sleep window and never quietly walk it back up.
+            </p>
+          </>
+        ) : null}
       </Card>
 
       {/* Save */}
@@ -727,23 +811,16 @@ function ComfortRingCard({
             />
           ) : null}
 
-          {/* Household band — the range the system trains toward */}
-          <div className="mt-4 grid grid-cols-2 gap-3">
-            <MiniStat
-              label="Comfort Range"
-              value={model ? `${Math.round(model.summary.tLo)}–${Math.round(model.summary.tHi)}°F` : "—"}
+          {/* What we're targeting (spec v2.3 §4.2) — the preferred target, not a
+              range. A limit line appears ONLY when a health constraint overrides
+              preference, judged against the conditional slice at CURRENT humidity
+              (§4.1), never the temperature-axis projection. */}
+          {model && realityRh != null ? (
+            <TargetLine
+              target={selectTarget(model.band, model.inputs, realityRh)}
+              inputs={model.inputs}
+              active={model.band.active}
             />
-            <MiniStat
-              label="Humidity Range"
-              value={model ? `${Math.round(model.summary.rhLo)}–${Math.round(model.summary.rhHi)}%` : "—"}
-            />
-          </div>
-          {model?.preferredBelowFloor && model.preferredFloor != null ? (
-            <p className="mt-2 flex items-start gap-1.5 rounded-lg border border-warn/30 bg-warn/5 px-3 py-2 text-[11px] text-warn text-pretty">
-              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-              Your preferred temperature sits below your household&apos;s {Math.round(model.preferredFloor)}°F floor
-              (seniors present) — we target the achievable range instead.
-            </p>
           ) : null}
 
           {/* Recommendations — title only, collapsible */}
@@ -1279,6 +1356,49 @@ function MiniStat({ label, value }: { label: string; value: string }) {
     <div className="rounded-xl border border-border bg-elevated p-3 text-center">
       <p className="text-[10px] uppercase tracking-wider text-muted">{label}</p>
       <p className="mt-1 text-xl font-semibold tabular-nums text-foreground">{value}</p>
+    </div>
+  )
+}
+
+// §4.2 — "Targeting 68°F." plus a limit line ONLY when a health constraint
+// actually overrode preference. No range is shown.
+function TargetLine({
+  target,
+  inputs,
+  active,
+}: {
+  target: TargetSelection
+  inputs: ModelInputs
+  active: Constraint[]
+}) {
+  const has = (name: string) => active.some((c) => c.constraint_name === name)
+  let limit: string | null = null
+  if (target.tempClampedBy === "floor") {
+    limit = `Targeting ${Math.round(target.targetTempF)}°F rather than your ${Math.round(
+      inputs.preferred_temp_f,
+    )}°F, because a senior in the household needs a warmer floor.`
+  } else if (target.tempClampedBy === "ceiling") {
+    limit = `Targeting ${Math.round(target.targetTempF)}°F rather than your ${Math.round(
+      inputs.preferred_temp_f,
+    )}°F, because young children need it no warmer.`
+  } else if (target.rhClampedBy === "floor") {
+    limit = `Holding humidity at or above ${Math.round(target.targetRh)}% for ${
+      has("respiratory_humidity_floor") ? "asthma" : "your household's needs"
+    }.`
+  } else if (target.rhClampedBy === "ceiling") {
+    limit = `Holding humidity at or below ${Math.round(target.targetRh)}% for ${
+      has("allergen_humidity_ceiling") ? "allergies" : "asthma"
+    }.`
+  }
+
+  return (
+    <div className="mt-4 rounded-xl border border-accent/30 bg-accent/5 px-4 py-3">
+      <p className="text-[10px] uppercase tracking-wider text-muted">Targeting</p>
+      <p className="mt-0.5 text-xl font-semibold tabular-nums text-foreground">
+        {Math.round(target.targetTempF)}°F
+        <span className="ml-1 text-sm font-normal text-muted-foreground">/ {Math.round(target.targetRh)}%</span>
+      </p>
+      {limit ? <p className="mt-2 text-[12px] leading-snug text-muted-foreground text-pretty">{limit}</p> : null}
     </div>
   )
 }
