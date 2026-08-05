@@ -132,6 +132,23 @@ export async function POST(request: Request) {
         .filter((h: string) => HEALTH.has(h))
     }
 
+    // Sleep schedule (spec v2.3 §8) — a first-class setting, decoupled from any
+    // health flag. Times are "HH:MM"; target/floor are °F.
+    const timeRe = /^([01]\d|2[0-3]):[0-5]\d$/
+    if ("sleep_start" in body && timeRe.test(String(body.sleep_start))) update.sleep_start = body.sleep_start
+    if ("sleep_end" in body && timeRe.test(String(body.sleep_end))) update.sleep_end = body.sleep_end
+    if ("sleep_enabled" in body) update.sleep_enabled = !!body.sleep_enabled
+    if ("sleep_target_f" in body) {
+      const n = Number(body.sleep_target_f)
+      if (!Number.isNaN(n)) update.sleep_target_f = Math.min(80, Math.max(60, n))
+    }
+    // Comfort minimum (spec v2.3 §6.4) — the coldest the household will accept.
+    // Raising it above the sleep target correctly disables overnight overcool.
+    if ("min_comfort_temp_f" in body) {
+      const n = Number(body.min_comfort_temp_f)
+      if (!Number.isNaN(n)) update.min_comfort_temp_f = Math.min(78, Math.max(60, n))
+    }
+
     const supabase = createAdminClient()
     const { data, error } = await supabase
       .from("comfort_profile")
