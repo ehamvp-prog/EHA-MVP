@@ -119,12 +119,19 @@ const HEALTH_OPTIONS: { value: string; label: string }[] = [
   { value: "sleep_issues", label: "Sleep Issues" },
 ]
 
-// Score → label + semantic color, for the reality arc / status line.
-function happyBand(score: number): { label: string; color: "ok" | "warn" } {
-  if (score >= 80) return { label: "Comfortable", color: "ok" }
-  if (score >= 60) return { label: "Slightly off", color: "warn" }
-  if (score >= 40) return { label: "Uncomfortable", color: "warn" }
-  return { label: "Well outside your range", color: "warn" }
+// Comfort Score vs Happy Number → label + semantic color for the reality arc /
+// status line. Under the typical-anchored scale (spec v2.4 §3.2) the score is
+// NOT "higher is better" — the home is on target when the score EQUALS the
+// Happy Number, and drifting either way (toward generic OR past their ideal)
+// is worse. So the label is keyed off the DEVIATION between the two numbers,
+// with a warmer/cooler cue for direction.
+function comfortStatus(score: number, happy: number, warmer: boolean): { label: string; color: "ok" | "warn" } {
+  const d = Math.abs(score - happy)
+  const dir = warmer ? "warm" : "cool"
+  if (d <= 6) return { label: "On your comfort target", color: "ok" }
+  if (d <= 15) return { label: `Slightly ${dir} of your target`, color: "warn" }
+  if (d <= 30) return { label: `Running ${dir} of your target`, color: "warn" }
+  return { label: `Well ${dir} of your target`, color: "warn" }
 }
 
 // A plain-English gap breakdown derived entirely from the unified model's
@@ -169,9 +176,15 @@ function buildGap(
   ctx: ComfortContext,
 ): { view: GapView; factors: ComfortFactor[] } {
   const detail = scoreAgainstBand(realityTempF, realityRh, band, inputs, ctx)
-  const gap = Math.max(0, Math.round(band.happyNumber - detail.score))
-  // Within ~5pt of the Happy Number (plus tolerance) = dialed in.
-  const withinRange = detail.score >= band.happyNumber - (5 + band.tolerance)
+  // Comfort Score and Happy Number now live on the SAME typical-anchored scale
+  // (spec v2.4 §3.2): the score reads the Happy Number when the home is exactly
+  // at target and moves away in EITHER direction as conditions drift. So the gap
+  // is the absolute deviation, and dialed-in is |score − happy| ≤ tolerance —
+  // NOT the old one-sided "score ≥ happy − tol", which read a too-warm home
+  // (score above happy) as dialed in.
+  const deviation = Math.abs(detail.score - band.happyNumber)
+  const gap = Math.round(deviation)
+  const withinRange = deviation <= 5 + band.tolerance
 
   const binding = detail.factors.filter((f) => f.severity === "binding")
   // Primary driver = the axis of the first binding constraint (respiratory
@@ -182,18 +195,19 @@ function buildGap(
       ? factorAxis(binding[0].code, realityTempF, realityRh, band)
       : "none"
 
+  // The exact target the engine drives to (household preference clamped to the
+  // slice at current humidity, spec §5) — also gives the direction of the miss.
+  const targetTempF = selectTarget(band, inputs, realityRh).targetTempF
+  const warmer = realityTempF > targetTempF
+
   const plain = withinRange
-    ? "Your home is within your household's comfort range."
+    ? "Your home is right at your household's comfort target."
     : binding[0]?.label
       ? `Your home reads ${Math.round(realityTempF)}°F / ${Math.round(realityRh)}% — ${binding[0].label}.`
-      : `Your home is ${gap} points below your Happy Number of ${band.happyNumber}.`
+      : `Your home reads ${Math.round(realityTempF)}°F / ${Math.round(realityRh)}% — ${warmer ? "warmer" : "cooler"} than your ${Math.round(targetTempF)}°F target.`
 
-  // Suggest the household's PREFERRED temperature, clamped to the slice at the
-  // current humidity — the exact target the engine drives to (spec v2.1 §5).
   const suggestedSetpointF =
-    primary === "temperature" || (primary === "none" && !withinRange)
-      ? Math.round(selectTarget(band, inputs, realityRh).targetTempF)
-      : null
+    primary === "temperature" || (primary === "none" && !withinRange) ? Math.round(targetTempF) : null
   const fanWouldHelp = primary === "humidity"
 
   return { view: { gap, withinRange, primary, plain, fanWouldHelp, suggestedSetpointF }, factors: detail.factors }
@@ -739,7 +753,11 @@ function ComfortRingCard({
     )
   }
 
-  const realityBand = happyBand(reality)
+  const warmer =
+    model != null && realityTempF != null && realityRh != null
+      ? realityTempF > selectTarget(model.band, model.inputs, realityRh).targetTempF
+      : true
+  const realityBand = comfortStatus(reality, target, warmer)
   const dialedIn = gapInfo.withinRange
   const sourceLabel =
     source === "nest" ? "Live from your thermostat" : "Live from your return-air sensor"
