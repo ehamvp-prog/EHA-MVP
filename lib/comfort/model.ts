@@ -6,15 +6,21 @@
 // the database resolves for us (comfort_model_inputs / comfort_band_constraints
 // RPCs). We NEVER re-derive constraints here — the DB is the source of truth.
 //
-//   Happy Number  = score(preferred_temp_f, preferred_rh, …)   (the target's score)
-//   Comfort Score = score(actual_temp,      actual_rh,     …)  (reality's score)
+//   Happy Number  = 0.60*width_component + 0.40*centrality       (spec v2.3 §3.1)
+//   Comfort Score = happy + (100-happy)*min(1, d_live/d_ref)     (spec v2.3 §3.2)
 //
-// ONE PPD-based scoring function (spec v2.1 §3) drives both numbers; they differ
-// only in the conditions fed in, which is what makes the comparison valid. The
-// band GEOMETRY (accepted points, health constraints) depends on activity,
-// occupants, health, and season — NOT on the preferred temp/RH. The Happy Number
-// DOES depend on the preferred conditions, because it is simply the score the
-// household earns at their own stated target.
+// The Happy Number is Elevate's OWN metric, not raw ASHRAE. It measures how
+// SPECIFIC the household's climate is: width_component from how much of the PMV
+// envelope survives the household's health constraints, centrality from how far
+// the household's PREFERRED conditions sit from a typical climate (73°F/45%).
+// 1 = a highly specific climate, 100 = a typical one. Every profile qualifier
+// (asthma, allergies, occupants, activity) narrows the band and lowers it.
+//
+// The Comfort Score is that same Happy Number anchored AT the household's target
+// and rising to 100 as live conditions drift toward the typical reference. It
+// equals the Happy Number when the home is exactly at preference, and any drift
+// in any direction raises it — so the full 0-100 range is always available no
+// matter how narrow the band is, and the band width never caps the ceiling.
 // ---------------------------------------------------------------------------
 
 import { pmvPpdAshrae } from "./pmv"
@@ -31,6 +37,18 @@ const T_STEP = 1
 const RH_LO = 20
 const RH_HI = 70
 const RH_STEP = 2
+
+// Typical-climate reference point + normalization scales for the Happy Number's
+// centrality term and the Comfort Score's radial curve (spec v2.3 §3.1/§3.2).
+const REF_T = 73
+const REF_RH = 45
+const T_SCALE = 12
+const RH_SCALE = 25
+
+// Normalized radial distance in (°F, %RH) space, used by both the Happy Number
+// (preferred vs typical) and the Comfort Score (live vs preferred).
+const radial = (dTemp: number, dRh: number) =>
+  Math.sqrt((dTemp / T_SCALE) ** 2 + (dRh / RH_SCALE) ** 2)
 
 export type ConstraintApplies = "baseline" | "night_overlay_2200_0600"
 
@@ -127,24 +145,34 @@ function ppdAt(tempF: number, rh: number, inputs: ModelInputs, ctx: ComfortConte
   return Number.isFinite(ppd) ? ppd : 100
 }
 
-// Comfort score 0-100 from PPD alone (spec v2.1 §3). ASHRAE PPD bottoms out near
-// 5% even in a thermally perfect room, so scoring `100 - PPD` directly would cap
-// the scale at 95. Rescaling by /95 (i.e. /(100 - PPD_FLOOR)) makes a perfect
-// room read exactly 100 and lets the full 0-100 range be reached in both
-// directions. This is the ONE function behind BOTH the Happy Number (fed the
-// preferred conditions) and the Comfort Score (fed live conditions). It depends
-// only on the conditions and the household's physiological inputs — never on the
-// band geometry or any learned anchor.
-const PPD_FLOOR = 5
-export function comfortScore(
-  tempF: number,
-  rh: number,
-  inputs: ModelInputs,
-  ctx: ComfortContext,
+// Comfort Score (spec v2.3 §3.2) — the Happy Number at the household's target,
+// rising to 100 as live conditions drift toward the typical reference (73/45).
+//
+//   comfort = happy + (100 - happy) * min(1, d_live / d_ref)
+//
+// where d_live is the normalized distance from live to PREFERRED and d_ref is
+// the normalized distance from PREFERRED to typical. At preference d_live = 0 so
+// comfort = happy; at the typical climate d_live = d_ref so comfort = 100. Any
+// drift in any direction raises it, so the score is monotonic in distance from
+// target — which is what lets §6.1 use |comfort - happy| as a "something's
+// wrong" trigger. The band width shapes `happy`; it never caps this scale.
+//
+// This is pure geometry — no PMV, no band, no centroid. PMV/PPD is still used to
+// SWEEP the band (ppdAt) and to explain the score, never to produce the number.
+export function comfortScoreCurve(
+  liveTempF: number,
+  liveRh: number,
+  happyNumber: number,
+  prefTempF: number,
+  prefRh: number,
 ): number {
-  const ppd = ppdAt(tempF, rh, inputs, ctx)
-  const raw = (100 * (100 - ppd)) / (100 - PPD_FLOOR)
-  return Math.max(0, Math.min(100, Math.round(raw)))
+  const dLive = radial(liveTempF - prefTempF, liveRh - prefRh)
+  const dRef = radial(REF_T - prefTempF, REF_RH - prefRh)
+  // Guard the degenerate case where the household's preference IS the typical
+  // climate (d_ref ~ 0): any drift is immediately "fully generic".
+  const ratio = dRef > 1e-6 ? Math.min(1, dLive / dRef) : dLive > 1e-6 ? 1 : 0
+  const raw = happyNumber + (100 - happyNumber) * ratio
+  return Math.max(1, Math.min(100, Math.round(raw)))
 }
 
 // A constraint REMOVES points in a region; a point "passes" if it's not removed.
@@ -257,11 +285,19 @@ export function deriveBand(inputs: ModelInputs, ctx: ComfortContext): ComfortBan
     s = sweep(inputs, ctx, working)
   }
 
-  // Happy Number (spec v2.1 §3): the comfort score the household earns at their
-  // OWN stated preferred conditions. Not a specificity measure, not a band-center
-  // distance, not an anchor — just score(preferred) under the same function that
-  // scores live reality, so the two numbers are directly comparable.
-  const happyNumber = comfortScore(inputs.preferred_temp_f, inputs.preferred_rh, inputs, ctx)
+  // Happy Number (spec v2.3 §3.1) — how specific this household's climate is.
+  //   width_component: fraction of the PMV envelope that survives the household's
+  //     health constraints (asthma/allergy/senior/child limits). A tighter band
+  //     → smaller share → lower number. This is where every profile qualifier
+  //     legitimately moves the Happy Number.
+  //   centrality: how close the household's PREFERRED conditions sit to a typical
+  //     climate (73°F/45%). Measured AT the preference — NOT at the band centroid
+  //     — so the number describes the household's own climate, not the middle of
+  //     what they would merely tolerate.
+  const widthComponent = s.envelope > 0 ? (100 * s.band) / s.envelope : 0
+  const distance = radial(inputs.preferred_temp_f - REF_T, inputs.preferred_rh - REF_RH)
+  const centrality = 100 * Math.max(0, 1 - distance)
+  const happyNumber = Math.max(1, Math.min(100, Math.round(0.6 * widthComponent + 0.4 * centrality)))
 
   return {
     happyNumber,
@@ -367,15 +403,15 @@ export function scoreAgainstBand(
   inputs: ModelInputs,
   ctx: ComfortContext,
 ): { score: number; factors: ComfortFactor[] } {
-  // The number is pure PPD (spec v2.1 §3) — the SAME function that produced the
-  // Happy Number, so Comfort Score and Happy Number are directly comparable. The
-  // band is used ONLY to explain the score (which health constraint binds, if
-  // any), never to shape the number. No band-center anchor, no distance falloff.
+  // The number is the target-anchored curve (spec v2.3 §3.2): the Happy Number
+  // at preference, 100 at the typical reference. The band is used ONLY to explain
+  // the score (which health constraint binds, if any) and to decide `inside`,
+  // never to shape the number.
   const passes = band.active.every((c) => passesConstraint(tempF, rh, c))
   const thermalOk = ppdAt(tempF, rh, inputs, ctx) <= PPD_ACCEPTABLE
   const inside = band.bandPoints > 0 && passes && thermalOk
   return {
-    score: comfortScore(tempF, rh, inputs, ctx),
+    score: comfortScoreCurve(tempF, rh, band.happyNumber, inputs.preferred_temp_f, inputs.preferred_rh),
     factors: buildFactors(tempF, rh, band, inside),
   }
 }
