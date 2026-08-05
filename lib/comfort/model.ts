@@ -6,8 +6,8 @@
 // the database resolves for us (comfort_model_inputs / comfort_band_constraints
 // RPCs). We NEVER re-derive constraints here — the DB is the source of truth.
 //
-//   Happy Number  = 0.60*width_component + 0.40*centrality       (spec v2.3 §3.1)
-//   Comfort Score = happy + (100-happy)*min(1, d_live/d_ref)     (spec v2.3 §3.2)
+//   Happy Number  = 0.60*width_component + 0.40*centrality(preferred)  (spec §3.1)
+//   Comfort Score = happy + (100-happy)*(c_live-c_pref)/max(1,100-c_pref)  (§3.2 v2.4)
 //
 // The Happy Number is Elevate's OWN metric, not raw ASHRAE. It measures how
 // SPECIFIC the household's climate is: width_component from how much of the PMV
@@ -16,11 +16,15 @@
 // 1 = a highly specific climate, 100 = a typical one. Every profile qualifier
 // (asthma, allergies, occupants, activity) narrows the band and lowers it.
 //
-// The Comfort Score is that same Happy Number anchored AT the household's target
-// and rising to 100 as live conditions drift toward the typical reference. It
-// equals the Happy Number when the home is exactly at preference, and any drift
-// in any direction raises it — so the full 0-100 range is always available no
-// matter how narrow the band is, and the band width never caps the ceiling.
+// The Comfort Score lives on that SAME typical-anchored scale (v2.4 §3.2): it
+// reads the Happy Number when the home is exactly at the household's preference
+// and rises toward 100 as conditions approach typical — but also falls below the
+// Happy Number, to 1, when conditions drift even further from typical than the
+// preference. So it is NOT "higher is better": the home is on target when the
+// Comfort Score EQUALS the Happy Number, and the app judges comfort by the
+// CLOSENESS of the two numbers, never by the score's height. This replaced an
+// earlier preferred-anchored, min()-capped curve that saturated at 100 for
+// everything at or past typical distance (77°F, 74°F and 90°F all read 100).
 // ---------------------------------------------------------------------------
 
 import { pmvPpdAshrae } from "./pmv"
@@ -45,10 +49,15 @@ const REF_RH = 45
 const T_SCALE = 12
 const RH_SCALE = 25
 
-// Normalized radial distance in (°F, %RH) space, used by both the Happy Number
-// (preferred vs typical) and the Comfort Score (live vs preferred).
+// Normalized radial distance in (°F, %RH) space from the typical reference.
 const radial = (dTemp: number, dRh: number) =>
   Math.sqrt((dTemp / T_SCALE) ** 2 + (dRh / RH_SCALE) ** 2)
+
+// Centrality: 100 at the typical climate (73°F/45%), falling to 0 as conditions
+// grow more specific. This is the ONE scale both numbers live on — the Happy
+// Number's centrality term and the Comfort Score are both measured with it, so
+// "1 = highly specific, 100 = typical" means the same thing for both.
+const centrality = (t: number, rh: number) => 100 * Math.max(0, 1 - radial(t - REF_T, rh - REF_RH))
 
 export type ConstraintApplies = "baseline" | "night_overlay_2200_0600"
 
@@ -145,20 +154,23 @@ function ppdAt(tempF: number, rh: number, inputs: ModelInputs, ctx: ComfortConte
   return Number.isFinite(ppd) ? ppd : 100
 }
 
-// Comfort Score (spec v2.3 §3.2) — the Happy Number at the household's target,
-// rising to 100 as live conditions drift toward the typical reference (73/45).
+// Comfort Score (spec v2.4 §3.2) — anchored at the TYPICAL climate, on the same
+// scale as the Happy Number. It reads the Happy Number when the home is exactly
+// at the household's preference and rises to 100 as conditions approach typical
+// (73°F/45%). Crucially it can also fall BELOW the Happy Number and clamp to 1
+// when the home drifts further from typical than the preference already sits —
+// so it resolves ABOVE target and distinguishes too-hot from too-cold, which
+// the old preferred-anchored, min()-capped curve could not (everything at or
+// past typical distance saturated at 100).
 //
-//   comfort = happy + (100 - happy) * min(1, d_live / d_ref)
+//   c_pref = centrality(preferred)          // how specific the household's climate is
+//   c_live = centrality(live)               // how specific conditions are right now
+//   comfort = happy + (100 - happy) * (c_live - c_pref) / max(1, 100 - c_pref)
 //
-// where d_live is the normalized distance from live to PREFERRED and d_ref is
-// the normalized distance from PREFERRED to typical. At preference d_live = 0 so
-// comfort = happy; at the typical climate d_live = d_ref so comfort = 100. Any
-// drift in any direction raises it, so the score is monotonic in distance from
-// target — which is what lets §6.1 use |comfort - happy| as a "something's
-// wrong" trigger. The band width shapes `happy`; it never caps this scale.
-//
-// This is pure geometry — no PMV, no band, no centroid. PMV/PPD is still used to
-// SWEEP the band (ppdAt) and to explain the score, never to produce the number.
+// At preference c_live == c_pref → comfort == happy. At typical c_live == 100 →
+// comfort == 100. max(1, …) guards the household whose preference IS typical.
+// Pure geometry — no PMV, no band, no centroid; PMV/PPD only sweeps and explains
+// the band, never produces this number.
 export function comfortScoreCurve(
   liveTempF: number,
   liveRh: number,
@@ -166,12 +178,9 @@ export function comfortScoreCurve(
   prefTempF: number,
   prefRh: number,
 ): number {
-  const dLive = radial(liveTempF - prefTempF, liveRh - prefRh)
-  const dRef = radial(REF_T - prefTempF, REF_RH - prefRh)
-  // Guard the degenerate case where the household's preference IS the typical
-  // climate (d_ref ~ 0): any drift is immediately "fully generic".
-  const ratio = dRef > 1e-6 ? Math.min(1, dLive / dRef) : dLive > 1e-6 ? 1 : 0
-  const raw = happyNumber + (100 - happyNumber) * ratio
+  const cPref = centrality(prefTempF, prefRh)
+  const cLive = centrality(liveTempF, liveRh)
+  const raw = happyNumber + ((100 - happyNumber) * (cLive - cPref)) / Math.max(1, 100 - cPref)
   return Math.max(1, Math.min(100, Math.round(raw)))
 }
 
@@ -295,9 +304,8 @@ export function deriveBand(inputs: ModelInputs, ctx: ComfortContext): ComfortBan
   //     — so the number describes the household's own climate, not the middle of
   //     what they would merely tolerate.
   const widthComponent = s.envelope > 0 ? (100 * s.band) / s.envelope : 0
-  const distance = radial(inputs.preferred_temp_f - REF_T, inputs.preferred_rh - REF_RH)
-  const centrality = 100 * Math.max(0, 1 - distance)
-  const happyNumber = Math.max(1, Math.min(100, Math.round(0.6 * widthComponent + 0.4 * centrality)))
+  const centralityPref = centrality(inputs.preferred_temp_f, inputs.preferred_rh)
+  const happyNumber = Math.max(1, Math.min(100, Math.round(0.6 * widthComponent + 0.4 * centralityPref)))
 
   return {
     happyNumber,
