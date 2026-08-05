@@ -40,15 +40,24 @@ export async function GET() {
       .limit(500)
     if (error) throw error
 
-    const events = ((data ?? []) as Row[]).map((r) => ({
-      id: String(r.id),
-      occurred_at: r.occurred_at,
-      action_type: r.action_type,
-      measured_savings_usd: r.measured_savings_usd == null ? null : Number(r.measured_savings_usd),
-      confidence: r.confidence ?? "none",
-      limiting_factors: Array.isArray(r.limiting_factors) ? r.limiting_factors : [],
-      explanation: r.explanation ?? null,
-    }))
+    const events = ((data ?? []) as Row[]).map((r) => {
+      // Spec v2.3 §9: comfort_adjust drives toward the household's target;
+      // reaching comfort is the product working, not a saving. It is NEVER
+      // attributed savings, enforced here at read time so no future rebuild of
+      // savings_events can leak service-withdrawal dollars into the ledger.
+      const excluded = r.action_type === "comfort_adjust"
+      return {
+        id: String(r.id),
+        occurred_at: r.occurred_at,
+        action_type: r.action_type,
+        measured_savings_usd: excluded ? 0 : r.measured_savings_usd == null ? null : Number(r.measured_savings_usd),
+        confidence: excluded ? "excluded" : (r.confidence ?? "none"),
+        limiting_factors: Array.isArray(r.limiting_factors) ? r.limiting_factors : [],
+        explanation: excluded
+          ? "Excluded per spec §9 — moving toward your comfort target is the system working, not energy saved."
+          : (r.explanation ?? null),
+      }
+    })
 
     return NextResponse.json({ ok: true, events })
   } catch (e) {

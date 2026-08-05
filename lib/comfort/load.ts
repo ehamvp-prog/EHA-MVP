@@ -41,14 +41,36 @@ export type LoadedComfortModel = {
   context: ComfortContext
 }
 
+// Parse an "HH:MM" clock string to an hour number (0-23), floored to the hour
+// since the band overlay is evaluated hourly.
+function clockHour(s: string | undefined, fallback: number): number {
+  const n = Number(String(s ?? "").slice(0, 2))
+  return Number.isFinite(n) ? n : fallback
+}
+
 // Build the ASHRAE context from a moment + live blower state. Month drives
-// clothing insulation; the 22:00-06:00 window turns on the sleep overlay; the
-// blower drives indoor air speed.
-export function comfortContext(opts: { at?: Date; blowerOn: boolean }): ComfortContext {
+// clothing insulation; the sleep window (from the profile, spec v2.3 §8.3)
+// turns on the sleep overlay; the blower drives indoor air speed.
+//
+// The window is judged against Chicago wall-clock (DST-aware) and handles the
+// normal cross-midnight case: 22:00-06:00 means hour >= start OR hour < end.
+export function comfortContext(opts: {
+  at?: Date
+  blowerOn: boolean
+  sleep?: { start: string; end: string } | null
+}): ComfortContext {
   const at = opts.at ?? new Date()
   const p = chicagoParts(at)
   const hour = chicagoHour(at)
-  const night = hour >= 22 || hour < 6
+  const start = clockHour(opts.sleep?.start, 22)
+  const end = clockHour(opts.sleep?.end, 6)
+  // A null sleep window (disabled) yields no night overlay at all.
+  const night =
+    opts.sleep === null
+      ? false
+      : start <= end
+        ? hour >= start && hour < end
+        : hour >= start || hour < end
   return { month: p.month - 1, blower_on: opts.blowerOn, night }
 }
 
