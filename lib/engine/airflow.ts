@@ -18,6 +18,12 @@
 //                      CFM here (that would be PSC behavior); it only flags
 //                      operation beyond the ECM's rated static limit. Live
 //                      blower watts validate that the motor is holding.
+//   "derived_static_curve_v1"
+//                    : constant-TORQUE ECM (X13 / multi-tap, e.g. Goodman
+//                      GM9S). Holds torque, NOT airflow, so CFM falls as
+//                      static rises. Read against a derived static curve
+//                      anchored to design airflow. This is what actually
+//                      drives this site's blower — see the curve below.
 //   "static_derived" : PSC / fixed-speed blower read against a GENERALIZED
 //                      blower curve anchored to design airflow. Honest
 //                      approximation, far better than a fixed number.
@@ -38,6 +44,7 @@
 export type AirflowConfidence =
   | "static_oem" // static read against a real OEM blower table
   | "ecm_commanded" // constant-airflow ECM holding its commanded CFM
+  | "derived_static_curve_v1" // constant-torque ECM read against its static curve
   | "static_derived" // PSC/fixed-speed read against the generalized curve
   | "fallback" // airflow unknown
 
@@ -61,6 +68,40 @@ const HIGH_STATIC_INWC = 0.8
 // Keep the curve within sane physical bounds.
 const FACTOR_MIN = 0.4
 const FACTOR_MAX = 1.6
+
+// --- Constant-TORQUE ECM behavior (X13 / multi-tap) ----------------------
+// A constant-TORQUE motor is NOT a constant-airflow motor. It holds constant
+// torque, so airflow FALLS as external static rises (a loading filter drops
+// CFM) — flatter than a PSC, but nowhere near the flat line of a true
+// constant-airflow ECM. This site's blower (Goodman GM9S 9-speed, tap 5) is
+// exactly this type, so it must be modelled with a static curve, not held flat.
+//
+// The curve is anchored to the delivered design airflow (rated = tonnage *
+// cfm_per_ton, which already encodes the selected tap) at the tap's design
+// external static, then falls off linearly with static:
+//
+//   cfm = clamp(rated * (1 - CT_SLOPE * (static - CT_ANCHOR)), CT_MIN, CT_MAX)
+//
+// Constants below reproduce the derived tap-5 curve that backfilled the
+// historical readings (airflow_confidence = 'derived_static_curve_v1'):
+// 840 CFM at 0.70" WC, ~3.5% CFM lost per +0.1" WC. Bounds are the physical
+// envelope for this profile. An OEM blower table for the exact model/tap
+// upgrades this to "static_oem" via lookupOemTableCfm with no other change.
+const CT_ANCHOR_STATIC_INWC = 0.7 // design external static the curve anchors to
+const CT_SLOPE_PER_INWC = 0.35 // fraction of rated CFM lost per 1.0" WC above anchor
+const CT_CFM_MIN = 600 // lower physical bound
+const CT_CFM_MAX = 1000 // upper physical bound (near-zero static ceiling)
+
+/** Constant-torque (X13) ECM? These vary airflow with static, unlike constant-CFM. */
+function isConstantTorque(ecmProfile?: string | null): boolean {
+  return typeof ecmProfile === "string" && ecmProfile.trim().toLowerCase().startsWith("constant_torque")
+}
+
+/** Constant-torque static curve: rated at anchor static, linear falloff, clamped. */
+function constantTorqueCfm(ratedCfm: number, staticInWc: number): number {
+  const raw = ratedCfm * (1 - CT_SLOPE_PER_INWC * (staticInWc - CT_ANCHOR_STATIC_INWC))
+  return Math.round(clamp(raw, CT_CFM_MIN, CT_CFM_MAX))
+}
 
 // --- Constant-airflow ECM behavior ---------------------------------------
 // A constant-CFM ECM is DESIGNED to hold its commanded airflow across the
@@ -174,6 +215,25 @@ export function deriveAirflow(input: AirflowInputs): AirflowResult {
       staticFlag,
       generalizedModel: false,
       note: "Airflow from OEM blower table at measured static.",
+    }
+  }
+
+  // Constant-TORQUE ECM (X13 / multi-tap): airflow FALLS with static. Must be
+  // checked BEFORE the constant-airflow branch below, because isEcm() is true
+  // for any ecm_profile and would otherwise (wrongly) hold this blower flat.
+  if (isConstantTorque(input.ecmProfile)) {
+    const cfm = constantTorqueCfm(rated, staticInWc)
+    return {
+      cfm,
+      confidence: "derived_static_curve_v1",
+      ratedCfm: rated,
+      staticInWc,
+      staticFlag,
+      generalizedModel: true,
+      note:
+        staticFlag === "high"
+          ? `Constant-torque blower on its derived static curve at high static (${staticInWc.toFixed(2)}" WC) — airflow ~${cfm} CFM. Enter the exact model for an OEM table.`
+          : `Constant-torque blower on its derived static curve — airflow ~${cfm} CFM at ${staticInWc.toFixed(2)}" WC (falls as the filter loads).`,
     }
   }
 

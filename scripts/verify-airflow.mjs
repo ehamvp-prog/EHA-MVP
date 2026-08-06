@@ -51,5 +51,24 @@ check("PSC @1.0\" CFM is cut below 700 (fan-law)", pscCut, true)
 r = deriveAirflow({ ...base, tonnage: null, ecmProfile: "400 CFM/ton", staticInWc: 0.6, blowerWatts: 300 })
 check("No tonnage -> fallback", r.confidence, "fallback")
 
+// 7. Constant-TORQUE ECM (this site: Goodman GM9S tap 5, rated 2.5*336 = 840).
+//    Airflow must VARY with static and match the derived static curve that
+//    backfilled the historical readings (verified diff=0 against the DB).
+const ct = { tonnage: 2.5, cfmPerTon: 336, blowerType: "furnace", blowerModel: "Gm9s800603bnaa", blowerSpeedTap: "5", ecmProfile: "constant_torque_9speed_tap5_derived_20260805" }
+r = deriveAirflow({ ...ct, staticInWc: 0.7, blowerWatts: 300 })
+near("CT @0.70\" -> 840 (anchor)", r.cfm, 840, 0)
+check("CT confidence is derived_static_curve_v1", r.confidence, "derived_static_curve_v1")
+check("CT is a generalized (non-OEM) model", r.generalizedModel, true)
+near("CT @0.67312\" -> 848 (matches DB)", deriveAirflow({ ...ct, staticInWc: 0.67312 }).cfm, 848, 0)
+near("CT @0.70918\" -> 837 (matches DB)", deriveAirflow({ ...ct, staticInWc: 0.70918 }).cfm, 837, 0)
+near("CT @0.7212\" -> 834 (matches DB)", deriveAirflow({ ...ct, staticInWc: 0.7212 }).cfm, 834, 0)
+near("CT @0.16828\" (low static) -> 996 (matches DB)", deriveAirflow({ ...ct, staticInWc: 0.16828 }).cfm, 996, 0)
+near("CT clamps to 1000 at near-zero static", deriveAirflow({ ...ct, staticInWc: 0.0 }).cfm, 1000, 0)
+near("CT clamps to 600 at very high static", deriveAirflow({ ...ct, staticInWc: 2.0 }).cfm, 600, 0)
+// Airflow must NOT be held flat the way a constant-airflow ECM would be.
+check("CT airflow varies with static (not flat)", deriveAirflow({ ...ct, staticInWc: 0.3 }).cfm !== deriveAirflow({ ...ct, staticInWc: 0.9 }).cfm, true)
+// No static reading -> fallback (cannot place the point on the curve).
+check("CT with no static -> fallback", deriveAirflow({ ...ct, staticInWc: null }).confidence, "fallback")
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)
