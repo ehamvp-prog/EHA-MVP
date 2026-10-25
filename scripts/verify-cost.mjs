@@ -1,12 +1,9 @@
 // Verifies Evergy RTOU period/season/holiday logic against known cases.
 // Run: node scripts/verify-cost.mjs
-import {
-  computeCost,
-  toCstParts,
-  isRtouHoliday,
-  touPeriodFor,
-  seasonForMonth,
-} from "../lib/engine/cost.ts"
+import "./_ts-resolve.mjs"
+const { computeCost, toCstParts, isRtouHoliday, touPeriodFor, seasonForMonth } = await import(
+  "../lib/engine/cost.ts"
+)
 
 let pass = 0
 let fail = 0
@@ -17,12 +14,20 @@ function check(label, got, want) {
   console.log(`[v0] ${ok ? "PASS" : "FAIL"}  ${label}  got=${got} want=${want}`)
 }
 
-// Helper: build a UTC ISO that lands on a specific CST wall-clock time.
-// CST = UTC-6, so CST hour H on date D => UTC hour H+6.
+// Helper: build a UTC ISO that lands on a specific Kansas City wall-clock hour
+// (CDT = UTC-5 in summer, CST = UTC-6 in winter). Uses Intl directly so it is
+// independent of the code under test.
+const chicagoHour = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Chicago",
+  hour: "2-digit",
+  hourCycle: "h23",
+})
 function cst(year, month, day, hour) {
-  const utcHour = hour + 6
-  const d = new Date(Date.UTC(year, month - 1, day, utcHour, 0, 0))
-  return d.toISOString()
+  for (const offset of [5, 6]) {
+    const d = new Date(Date.UTC(year, month - 1, day, hour + offset, 0, 0))
+    if (Number(chicagoHour.format(d)) === hour) return d.toISOString()
+  }
+  throw new Error(`no Chicago instant for ${year}-${month}-${day} ${hour}:00`)
 }
 
 console.log("[v0] ---- season ----")
@@ -65,14 +70,24 @@ console.log("[v0] ---- holiday suppresses on-peak ----")
 // July 4 2025 is a Friday, 5pm would be on-peak but it's a holiday
 check("July 4 5pm -> off (holiday)", touPeriodFor(toCstParts(cst(2025, 7, 4, 17))), "off_peak")
 
-console.log("[v0] ---- CST year-round (no DST) ----")
-// In July, naive US Central would be CDT (UTC-5). We force CST (UTC-6).
-// A reading at UTC 2025-07-15T22:00Z => CST 16:00 (4pm) = on-peak.
-// Under CDT it'd be 17:00, still on-peak, so test a boundary instead:
-// UTC 2025-07-16T01:00Z => CST 19:00 (on-peak). Under CDT=20:00 (off). Expect on-peak.
-check("CST boundary 7pm on-peak", computeCost(0, "2025-07-16T01:00:00Z").tou_period, "on_peak")
-// UTC 2025-07-16T02:00Z => CST 20:00 (off). Under CDT=21:00 (off). Expect off.
-check("CST boundary 8pm off-peak", computeCost(0, "2025-07-16T02:00:00Z").tou_period, "off_peak")
+console.log("[v0] ---- local prevailing time (DST-aware, matches eha_tou_period) ----")
+// Literal UTC instants, so these do not depend on the cst() helper.
+// Summer (CDT, UTC-5): Tue 2025-07-15.
+check("CDT 15:59 -> off", computeCost(0, "2025-07-15T20:59:00Z").tou_period, "off_peak")
+check("CDT 16:00 -> on (fixed UTC-6 said 15:00 off)", computeCost(0, "2025-07-15T21:00:00Z").tou_period, "on_peak")
+check("CDT 19:00 -> on", computeCost(0, "2025-07-16T00:00:00Z").tou_period, "on_peak")
+check("CDT 20:00 -> off (fixed UTC-6 said 19:00 on)", computeCost(0, "2025-07-16T01:00:00Z").tou_period, "off_peak")
+check("CDT hour from 2025-07-15T21:00Z", toCstParts("2025-07-15T21:00:00Z").hour, 16)
+// Winter (CST, UTC-6): Wed 2025-01-15.
+check("CST 16:00 -> on", computeCost(0, "2025-01-15T22:00:00Z").tou_period, "on_peak")
+check("CST 20:00 -> off", computeCost(0, "2025-01-16T02:00:00Z").tou_period, "off_peak")
+check("CST hour from 2025-01-15T22:00Z", toCstParts("2025-01-15T22:00:00Z").hour, 16)
+// Spring-forward night 2025-03-09: 07:30Z = 01:30 CST, 08:30Z = 03:30 CDT.
+check("DST night 01:30 CST hour", toCstParts("2025-03-09T07:30:00Z").hour, 1)
+check("DST night 03:30 CDT hour", toCstParts("2025-03-09T08:30:00Z").hour, 3)
+// Local midnight decides the date and weekday: 2025-07-16T04:30Z = Tue 23:30 CDT.
+check("23:30 CDT still Tuesday", toCstParts("2025-07-16T04:30:00Z").weekday, 2)
+check("23:30 CDT still the 15th", toCstParts("2025-07-16T04:30:00Z").day, 15)
 
 console.log("[v0] ---- rates + cost_per_hour ----")
 const c1 = computeCost(3400, cst(2025, 7, 15, 17)) // summer on-peak, 3400W

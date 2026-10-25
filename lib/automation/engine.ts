@@ -25,6 +25,7 @@ import {
   RTOU_RATES,
   seasonForMonth,
   toCstParts,
+  touPeriodFor,
   isRtouHoliday,
   type Season,
 } from "@/lib/engine/cost"
@@ -374,7 +375,7 @@ export async function runAutomationTick(): Promise<TickResult> {
       thermostat = await fetchThermostat(token)
       // Refresh the HVAC-status cache so the compute pipeline can gate
       // run-state on the thermostat even while the app is closed.
-      if (thermostat?.hvacStatus) await cacheHvacStatus(thermostat.hvacStatus)
+      if (thermostat) await cacheHvacStatus(thermostat.hvacStatus, thermostat.mode)
     } catch (err) {
       if (err instanceof NestRateLimitError) return { ran: false, action: null, detail: "rate_limited" }
       if (err instanceof NestAuthError) thermostat = null
@@ -487,7 +488,7 @@ export async function runAutomationTick(): Promise<TickResult> {
       }
     }
     // Coast window: 4–8 PM CST peak.
-    else if (parts.hour >= 16 && parts.hour < 20) {
+    else if (touPeriodFor(parts) === "on_peak") {
       if (nestConnected && coolingMode && thermostat?.coolSetpointF != null) {
         if (!inCooldown && !(await didActionToday(db, "peak_coast", nowMs))) {
           const clamp = clampSetpoint(thermostat.coolSetpointF + coastOffset, comfortFloor, coastMaxF)

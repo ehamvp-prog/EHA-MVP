@@ -11,6 +11,7 @@
 import { NextResponse } from "next/server"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { computeLiveReading, SITE_ID } from "@/lib/compute-reading"
+import { chicagoParts } from "@/lib/chicago-time"
 
 export const dynamic = "force-dynamic"
 
@@ -25,12 +26,10 @@ const MAX_INTERVAL_HOURS = 0.5
 // Evergy Schedule RTOU fixed monthly customer charge.
 const MONTHLY_CUSTOMER_CHARGE = 14.25
 
-// CST year-round (no DST), matching the tariff's stated basis.
-const CST_OFFSET_MS = 6 * 60 * 60 * 1000
-
+// Billing month in local prevailing time, the same clock as the tariff.
 function cstMonthKey(iso: string): string {
-  const cst = new Date(new Date(iso).getTime() - CST_OFFSET_MS)
-  return `${cst.getUTCFullYear()}-${String(cst.getUTCMonth() + 1).padStart(2, "0")}`
+  const { year, month } = chicagoParts(new Date(iso))
+  return `${year}-${String(month).padStart(2, "0")}`
 }
 
 export async function POST() {

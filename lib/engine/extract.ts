@@ -25,6 +25,10 @@ export interface HvacInputs {
   condenserWattsLeg2: number | null
   condenserTotalWatts: number | null
   blowerWatts: number | null
+  // Same reading as blowerWatts. On this site the "ahu" EM is clamped on the
+  // furnace's whole 120 V feed, so it is board + inducer + igniter + blower.
+  // The furnace sequence decoder reads it under this name.
+  furnaceWatts: number | null
   totalWatts: number | null
   returnTempF: number | null
   returnRh: number | null
@@ -187,6 +191,7 @@ export function extractHvacInputs(devices: LatestDevice[]): HvacInputs {
     condenserWattsLeg2: leg2,
     condenserTotalWatts: condTotal,
     blowerWatts: blowerW,
+    furnaceWatts: blowerW,
     totalWatts,
     returnTempF: ret?.t ?? null,
     returnRh: ret?.h ?? null,

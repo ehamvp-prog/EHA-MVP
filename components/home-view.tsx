@@ -10,6 +10,7 @@ import { ComfortChart } from "./comfort-chart"
 import { EfficiencyChart } from "./efficiency-chart"
 import { FilterHealthCard } from "./filter-health-card"
 import { chicagoParts } from "@/lib/chicago-time"
+import { touPeriodFor } from "@/lib/engine/cost"
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
 
@@ -382,9 +383,9 @@ function CostChart() {
     mutate()
   }
 
-  // Anchor weekday (Central) decides on-peak hours for the daily TOU bands.
+  // The tariff owner (lib/engine/cost.ts) decides each hour's TOU band, so the
+  // chart matches billing exactly — weekends and RTOU holidays included.
   const anchorWeekday = new Date(Date.UTC(selYear, selMonth - 1, safeDay)).getUTCDay()
-  const isWeekday = anchorWeekday >= 1 && anchorWeekday <= 5
 
   const monthLabel = `${MONTH_NAMES[selMonth - 1]} ${selYear}`
   const title =
@@ -399,8 +400,13 @@ function CostChart() {
   if (mode === "daily") {
     const byHour = new Map((data?.hours ?? []).map((h) => [h.hour, h]))
     bars = Array.from({ length: 24 }, (_, h) => {
-      const tou =
-        h < 6 ? "super_off_peak" : isWeekday && h >= 16 && h < 20 ? "on_peak" : "off_peak"
+      const tou = touPeriodFor({
+        year: selYear,
+        month: selMonth,
+        day: safeDay,
+        hour: h,
+        weekday: anchorWeekday,
+      })
       return {
         key: `h${h}`,
         label: hourLabel(h),

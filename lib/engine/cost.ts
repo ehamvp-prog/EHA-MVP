@@ -8,9 +8,15 @@
 //   - On-peak:        4pm–8pm Mon–Fri, NOT holidays
 //   - Off-peak:       all other hours
 //   - Season: Summer = Jun–Sep, Winter = Oct–May
-//   - All period/season logic uses CENTRAL STANDARD TIME year-round
-//     (fixed UTC-6, no daylight saving), as stated by the tariff.
+//   - All period/season logic uses LOCAL PREVAILING TIME in Kansas City
+//     (America/Chicago: CST in winter, CDT Mar–Nov). This must match
+//     eha_tou_period in the database exactly.
+//
+// This file owns the peak-hour rules. Nothing else may hard-code them —
+// call touPeriodFor(toCstParts(ts)) instead.
 // =====================================================================
+
+import { chicagoParts } from "../chicago-time"
 
 export type TouPeriod = "on_peak" | "off_peak" | "super_off_peak"
 export type Season = "summer" | "winter"
@@ -32,11 +38,10 @@ export const RTOU_RATES: Record<Season, Record<TouPeriod, number>> = {
 }
 
 // ---------------------------------------------------------------------
-// CST wall-clock parts. The tariff is defined in Central STANDARD time
-// year-round, so we shift UTC by a fixed -6 hours and read the parts.
-// This deliberately ignores daylight saving.
+// Local wall-clock parts (America/Chicago, DST-aware). The name is kept
+// for its callers; it is NOT fixed CST any more.
 // ---------------------------------------------------------------------
-interface CstParts {
+export interface CstParts {
   year: number
   month: number // 1-12
   day: number // 1-31
@@ -45,23 +50,14 @@ interface CstParts {
 }
 
 export function toCstParts(timestamp: string | Date): CstParts {
-  const d = typeof timestamp === "string" ? new Date(timestamp) : timestamp
-  // Shift by -6h, then read the UTC fields = CST wall clock.
-  const shifted = new Date(d.getTime() - 6 * 60 * 60 * 1000)
-  return {
-    year: shifted.getUTCFullYear(),
-    month: shifted.getUTCMonth() + 1,
-    day: shifted.getUTCDate(),
-    hour: shifted.getUTCHours(),
-    weekday: shifted.getUTCDay(),
-  }
+  return chicagoParts(typeof timestamp === "string" ? new Date(timestamp) : timestamp)
 }
 
 // ---------------------------------------------------------------------
 // Holidays excluded from on-peak (Evergy RTOU):
 //   New Year's Day, Memorial Day, Independence Day, Labor Day,
 //   Thanksgiving, Christmas.
-// Some are fixed-date, some are floating. All computed in CST.
+// Some are fixed-date, some are floating. All computed in local time.
 // ---------------------------------------------------------------------
 
 // nth weekday of a month, e.g. nthWeekday(2024, 5, 1, 5) = ... not used directly.

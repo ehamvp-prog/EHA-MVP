@@ -88,16 +88,41 @@ export async function hasNestConnection(): Promise<boolean> {
 
 // Persist the last-seen HVAC status so the compute pipeline can read the
 // thermostat's on/off mode without making its own SDM API call. Best-effort.
-export async function cacheHvacStatus(status: HvacStatus): Promise<void> {
-  if (!status) return
+export async function cacheHvacStatus(
+  status: HvacStatus,
+  mode: NestThermostat["mode"] = null,
+): Promise<void> {
+  if (!status && !mode) return
   try {
     const supabase = createAdminClient()
-    await supabase
-      .from("nest_tokens")
-      .update({ last_hvac_status: status, last_hvac_at: new Date().toISOString() })
-      .eq("site_id", SITE_ID)
+    const update: Record<string, string> = { last_hvac_at: new Date().toISOString() }
+    if (status) update.last_hvac_status = status
+    if (mode) update.last_hvac_mode = mode
+    await supabase.from("nest_tokens").update(update).eq("site_id", SITE_ID)
   } catch {
     /* non-fatal: caching is an optimization, not a requirement */
+  }
+}
+
+// Read the cached thermostat MODE (HEAT/COOL/HEATCOOL/OFF) if fresh. Same
+// freshness rule as getCachedHvacStatus; null means "unknown".
+export async function getCachedThermostatMode(
+  maxAgeMs = 10 * 60 * 1000,
+): Promise<NestThermostat["mode"]> {
+  try {
+    const supabase = createAdminClient()
+    const { data } = await supabase
+      .from("nest_tokens")
+      .select("last_hvac_mode, last_hvac_at")
+      .eq("site_id", SITE_ID)
+      .maybeSingle()
+    const mode = (data as { last_hvac_mode?: string | null } | null)?.last_hvac_mode ?? null
+    const at = (data as { last_hvac_at?: string | null } | null)?.last_hvac_at ?? null
+    if (!mode || !at) return null
+    if (Date.now() - new Date(at).getTime() > maxAgeMs) return null
+    return mode as NestThermostat["mode"]
+  } catch {
+    return null
   }
 }
 
