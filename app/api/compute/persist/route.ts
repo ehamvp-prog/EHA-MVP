@@ -76,15 +76,19 @@ export async function POST() {
       ? Number(last!.accumulated_cost ?? 0)
       : MONTHLY_CUSTOMER_CHARGE
 
-    // Energy added since the last row (capped against offline gaps).
+    // Electric + gas added since the last row (capped against offline gaps).
     let increment = 0
-    if (c.cost_per_hour != null && last) {
+    const hourlyCost =
+      c.cost_per_hour == null && c.gas_cost_per_hour == null
+        ? null
+        : (c.cost_per_hour ?? 0) + (c.gas_cost_per_hour ?? 0)
+    if (hourlyCost != null && last) {
       const elapsedHours = Math.min(
         MAX_INTERVAL_HOURS,
         (now - new Date(last.reading_at).getTime()) / 3_600_000,
       )
       // Only accrue within the same month; a fresh month starts clean.
-      if (sameMonth) increment = c.cost_per_hour * elapsedHours
+      if (sameMonth) increment = hourlyCost * elapsedHours
     }
     const accumulatedCost = Math.round((base + increment) * 10000) / 10000
 
@@ -121,6 +125,17 @@ export async function POST() {
       weather_obs_age_min: w?.weather_obs_age_min ?? null,
       weather_confidence: c.weather_confidence,
       efficiency_color: c.efficiency_color,
+      operating_mode: c.operating_mode,
+      season_mode: c.season_mode,
+      mode_source: c.mode_source,
+      furnace_stage: c.furnace_stage,
+      fire_stage: c.fire_stage,
+      temp_rise_f: c.temp_rise_f,
+      delivered_btuh: c.delivered_btuh,
+      gas_input_btuh: c.gas_input_btuh,
+      live_thermal_eff_pct: c.live_thermal_eff_pct,
+      rise_verdict: c.rise_verdict,
+      mode_disagreements: c.mode_disagreements,
     }
 
     const { error: insErr } = await supabase.from("computed_readings").insert(row)

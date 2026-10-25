@@ -9,9 +9,30 @@ import { createAdminClient } from "@/lib/supabase/admin"
 import { runEngine, type SystemProfileInputs, type ComputedReading } from "@/lib/engine"
 import { extractHvacInputs, type LatestDevice, type HvacInputs } from "@/lib/engine/extract"
 import { getWeatherByLatLon, type WeatherResult } from "@/lib/weather"
-import { nestConfigured, getCachedHvacStatus } from "@/lib/nest/client"
+import { nestConfigured, getCachedHvacStatus, getCachedThermostatMode } from "@/lib/nest/client"
+import type { FurnaceStage, FurnaceSignature } from "@/lib/engine/heating/furnace-sequence"
+import type { SeasonMode, ThermostatMode } from "@/lib/engine/heating/operating-mode"
 
 export const SITE_ID = "default"
+
+// system_profile.furnace_signature is jsonb. Accept it only when every value
+// is a finite number; otherwise return null so the engine uses the default.
+function parseFurnaceSignature(raw: unknown): FurnaceSignature | null {
+  const obj = typeof raw === "string" ? safeJson(raw) : raw
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null
+  const entries = Object.entries(obj as Record<string, unknown>)
+  if (entries.length === 0) return null
+  if (!entries.every(([, v]) => typeof v === "number" && Number.isFinite(v))) return null
+  return obj as FurnaceSignature
+}
+
+function safeJson(s: string): unknown {
+  try {
+    return JSON.parse(s)
+  } catch {
+    return null
+  }
+}
 
 export interface ComputeBundle {
   hasProfile: boolean
@@ -82,7 +103,7 @@ export async function computeLiveReading(): Promise<ComputeBundle> {
   // (off-cycle) trend so residual coil cooling is not flagged as a fault.
   const { data: prevRow } = await supabase
     .from("computed_readings")
-    .select("return_temp_f, supply_temp_f, static_pressure_inwc")
+    .select("return_temp_f, supply_temp_f, static_pressure_inwc, furnace_stage, season_mode")
     .eq("site_id", SITE_ID)
     .order("reading_at", { ascending: false })
     .limit(1)
@@ -91,11 +112,22 @@ export async function computeLiveReading(): Promise<ComputeBundle> {
   const prevSupply = (prevRow?.supply_temp_f as number | null) ?? null
   const prevCoolingDeltaF =
     prevReturn != null && prevSupply != null ? prevReturn - prevSupply : null
+  const prevRiseF =
+    prevReturn != null && prevSupply != null ? prevSupply - prevReturn : null
   const prevStaticInWc = (prevRow?.static_pressure_inwc as number | null) ?? null
+  const prevFurnaceStage = (prevRow?.furnace_stage as FurnaceStage | null) ?? null
+  const prevSeasonMode = (prevRow?.season_mode as SeasonMode | null) ?? null
+
+  const furnaceSignature = parseFurnaceSignature(
+    (profile as { furnace_signature?: unknown } | null)?.furnace_signature,
+  )
 
   // Authoritative thermostat on/off mode, read from the fresh cache only
   // (no SDM API call here — keeps Nest out of the compute hot path).
   const hvacStatus = nestConfigured() ? await getCachedHvacStatus() : null
+  const thermostatMode: ThermostatMode = nestConfigured()
+    ? ((await getCachedThermostatMode()) as ThermostatMode)
+    : null
 
   const computed = runEngine(devices, (profile as SystemProfileInputs) ?? null, {
     liveBarometricInHg: weather?.outdoor_pressure_inhg ?? null,
@@ -106,6 +138,11 @@ export async function computeLiveReading(): Promise<ComputeBundle> {
     hvacStatus,
     prevCoolingDeltaF,
     prevStaticInWc,
+    thermostatMode,
+    prevFurnaceStage,
+    prevSeasonMode,
+    prevRiseF,
+    furnaceSignature,
   })
 
   return {
