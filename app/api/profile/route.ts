@@ -33,7 +33,7 @@ const NUM_FIELDS = [
   "peak_dodger_coast_offset_f",
   // Furnace (heating) commissioning
   "gas_heating_value_btu_per_cuft",
-  "gas_rate_per_therm",
+  "gas_rate_override_per_mcf", // gas_rate_per_therm itself is derived by a DB trigger
   "furnace_stages",
   "furnace_input_nameplate_btuh",
   "furnace_input_low_fire_btuh",
