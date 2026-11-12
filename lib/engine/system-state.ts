@@ -29,7 +29,7 @@
 // evidence AND raise a sensor-fault flag describing the contradiction.
 // =====================================================================
 
-export type SystemRunState = "cooling" | "fan_only" | "off" | "fault"
+export type SystemRunState = "cooling" | "heating" | "fan_only" | "off" | "fault"
 
 // Nest/thermostat reported HVAC status, when a thermostat is connected.
 export type HvacStatus = "HEATING" | "COOLING" | "OFF" | null
@@ -47,6 +47,12 @@ export interface SystemStateInputs {
   // (off-cycle) trend versus a sustained, genuine contradiction.
   prevCoolingDeltaF?: number | null
   prevStaticInWc?: number | null
+  // Blower state decided upstream (furnace sequence decoder). When provided
+  // it replaces the >= BLOWER_ON_WATTS test: the furnace channel also carries
+  // the inducer, which alone exceeds 40 W with the blower OFF.
+  blowerOnOverride?: boolean
+  // Live operating mode says the furnace is heating.
+  heating?: boolean
 }
 
 export interface SensorFault {
@@ -93,12 +99,17 @@ export function deriveSystemState(inputs: SystemStateInputs): SystemStateResult 
     hvacStatus = null,
     prevCoolingDeltaF = null,
     prevStaticInWc = null,
+    blowerOnOverride,
+    heating = false,
   } = inputs
 
   const condReading = condenserTotalWatts != null
   const blowerReading = blowerWatts != null
   const condenserActive = condReading && (condenserTotalWatts as number) >= CONDENSER_ON_WATTS
-  const blowerActive = blowerReading && (blowerWatts as number) >= BLOWER_ON_WATTS
+  const blowerActive =
+    blowerOnOverride !== undefined
+      ? blowerOnOverride
+      : blowerReading && (blowerWatts as number) >= BLOWER_ON_WATTS
 
   const coolingDeltaF =
     returnTempF != null && supplyTempF != null ? returnTempF - supplyTempF : null
@@ -140,7 +151,13 @@ export function deriveSystemState(inputs: SystemStateInputs): SystemStateResult 
     }
   }
 
-  const fanOnly = !cooling && blowerActive
+  // A furnace heat cycle is never cooling, whatever the thermostat cache says.
+  if (heating) {
+    cooling = false
+    offCycle = false
+  }
+
+  const fanOnly = !cooling && !heating && blowerActive
 
   const basis: string[] = []
   if (thermostatConnected && thermostatCooling) basis.push("thermostat is calling for cool")
@@ -194,15 +211,21 @@ export function deriveSystemState(inputs: SystemStateInputs): SystemStateResult 
     }
   }
 
-  const state: SystemRunState = cooling
-    ? faults.some((f) => f.severity === "fault")
-      ? "fault"
-      : "cooling"
-    : fanOnly
-      ? "fan_only"
-      : "off"
+  if (heating) basis.push("furnace heat sequence running")
 
-  const note = cooling
+  const state: SystemRunState = heating
+    ? "heating"
+    : cooling
+      ? faults.some((f) => f.severity === "fault")
+        ? "fault"
+        : "cooling"
+      : fanOnly
+        ? "fan_only"
+        : "off"
+
+  const note = heating
+    ? `Furnace heating${coolingDeltaF != null ? ` (${(-coolingDeltaF).toFixed(1)}°F rise across the exchanger)` : ""}.`
+    : cooling
     ? state === "fault"
       ? `Cooling detected (${basis.join("; ")}), but ${faults.length} sensor issue${
           faults.length > 1 ? "s" : ""
@@ -220,6 +243,7 @@ export function deriveSystemState(inputs: SystemStateInputs): SystemStateResult 
           ? "Thermostat reports the system is off."
           : "No compressor power or coil temperature drop detected — system is off."
 
-  // `running` drives efficiency scoring: only true while actually cooling.
-  return { running: cooling, state, basis, faults, coolingDeltaF, offCycle, note }
+  // `running` = equipment actively conditioning (cooling or heating). The
+  // cooling efficiency math is gated separately on the live operating mode.
+  return { running: cooling || heating, state, basis, faults, coolingDeltaF, offCycle, note }
 }

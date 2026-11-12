@@ -7,27 +7,40 @@
 // NOT a fixed `Date.now() - 6h` offset — that offset double-shifts the already
 // Chicago-bucketed data and is wrong for half the year (during CDT).
 //
-// NOTE: this is deliberately NOT used by the Evergy tariff logic in
-// lib/engine/cost.ts, which is defined in Central STANDARD time year-round on
-// purpose. That file, and the compute/persist write path, are left untouched.
+// This is also the ONE clock for Evergy RTOU peak decisions: lib/engine/cost.ts
+// toCstParts delegates here, so app-side periods match eha_tou_period in the DB
+// (local prevailing time, CST/CDT).
 // ---------------------------------------------------------------------------
 
 const CHICAGO = "America/Chicago"
 
-// Wall-clock date parts in Chicago for a given instant.
+const WEEKDAY_INDEX: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }
+
+// Wall-clock parts in Chicago for a given instant.
 export function chicagoParts(d: Date = new Date()): {
   year: number
   month: number // 1–12
   day: number // 1–31
+  hour: number // 0–23
+  weekday: number // 0=Sun … 6=Sat
 } {
-  const parts = new Intl.DateTimeFormat("en-CA", {
+  const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: CHICAGO,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
+    hour: "2-digit",
+    hourCycle: "h23",
+    weekday: "short",
   }).formatToParts(d)
-  const get = (t: string) => Number(parts.find((p) => p.type === t)!.value)
-  return { year: get("year"), month: get("month"), day: get("day") }
+  const value = (t: string) => parts.find((p) => p.type === t)!.value
+  return {
+    year: Number(value("year")),
+    month: Number(value("month")),
+    day: Number(value("day")),
+    hour: Number(value("hour")),
+    weekday: WEEKDAY_INDEX[value("weekday")],
+  }
 }
 
 // "YYYY-MM-DD" today in Chicago (matches *_daily.day_local).

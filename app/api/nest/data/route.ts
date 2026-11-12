@@ -26,7 +26,7 @@ export async function GET() {
     const thermostat = await fetchThermostat(accessToken)
     // Cache the on/off mode so the compute engine can use it as the
     // authoritative run-state without making its own SDM call every tick.
-    if (thermostat?.hvacStatus) await cacheHvacStatus(thermostat.hvacStatus)
+    if (thermostat) await cacheHvacStatus(thermostat.hvacStatus, thermostat.mode)
     return NextResponse.json({ ok: true, configured: true, connected: true, thermostat })
   } catch (err) {
     if (err instanceof NestAuthError) {

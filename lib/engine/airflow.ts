@@ -125,6 +125,10 @@ interface AirflowInputs {
   ecmProfile: string | null | undefined // presence implies ECM/variable
   blowerSpeedTap: string | null | undefined
   blowerWatts?: number | null | undefined // live blower power, ECM validity signal
+  // Replaces tonnage * cfm_per_ton as the design anchor when provided (heating
+  // runs the blower on its heat tap). null = no anchor -> fallback; never
+  // silently reuse the cooling anchor.
+  designCfmOverride?: number | null
 }
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -169,7 +173,13 @@ function generalizedCurveCfm(ratedCfm: number, staticInWc: number): number {
 }
 
 export function deriveAirflow(input: AirflowInputs): AirflowResult {
-  const rated = ratedCfmOf(input.tonnage, input.cfmPerTon)
+  const hasOverride = input.designCfmOverride !== undefined
+  const override = input.designCfmOverride
+  const rated = hasOverride
+    ? override != null && Number.isFinite(override) && override > 0
+      ? override
+      : null
+    : ratedCfmOf(input.tonnage, input.cfmPerTon)
   const staticInWc =
     input.staticInWc != null && Number.isFinite(input.staticInWc)
       ? input.staticInWc
@@ -197,7 +207,9 @@ export function deriveAirflow(input: AirflowInputs): AirflowResult {
       staticInWc,
       staticFlag: staticInWc > HIGH_STATIC_INWC ? "high" : "normal",
       generalizedModel: false,
-      note: "No tonnage / airflow-per-ton in profile. Airflow unknown; capacity left blank.",
+      note: hasOverride
+        ? "No heat_cfm commissioned for the heat tap. Airflow unknown; delivered heat left blank."
+        : "No tonnage / airflow-per-ton in profile. Airflow unknown; capacity left blank.",
     }
   }
 
