@@ -16,6 +16,9 @@ const TEXT_FIELDS = [
   "blower_model",
   "blower_speed_tap",
   "ecm_profile",
+  // Furnace (heating) commissioning
+  "gas_type",
+  "heat_blower_speed_tap",
 ] as const
 
 const NUM_FIELDS = [
@@ -28,6 +31,20 @@ const NUM_FIELDS = [
   "auto_comfort_temp_max_f",
   "peak_dodger_precool_offset_f",
   "peak_dodger_coast_offset_f",
+  // Furnace (heating) commissioning
+  "gas_heating_value_btu_per_cuft",
+  "gas_rate_per_therm",
+  "furnace_stages",
+  "furnace_input_nameplate_btuh",
+  "furnace_input_low_fire_btuh",
+  "furnace_input_high_fire_btuh",
+  "furnace_afue_rated_pct",
+  "furnace_rise_min_f",
+  "furnace_rise_max_f",
+  "heat_cfm",
+  "supply_limit_f",
+  "auto_heat_temp_min_f",
+  "auto_heat_temp_max_f",
 ] as const
 
 // Automation enrollment toggles. Default OFF — nothing actuates until enrolled.
@@ -35,6 +52,7 @@ const BOOL_FIELDS = [
   "auto_comfort_enabled",
   "auto_comfort_fan_enabled",
   "peak_dodger_enabled",
+  "furnace_condensing",
 ] as const
 
 // GET: read the full installer profile for this home.
@@ -87,6 +105,14 @@ export async function POST(request: Request) {
         const n = raw === "" || raw === null || raw === undefined ? null : Number(raw)
         update[f] = n === null || Number.isNaN(n) ? null : n
       }
+    }
+
+    // gas_type has a CHECK constraint; anything else would fail the whole save.
+    if ("gas_type" in update && update.gas_type != null && !["natural_gas", "propane"].includes(String(update.gas_type))) {
+      return NextResponse.json({ ok: false, error: "Gas type must be natural gas or propane." }, { status: 400 })
+    }
+    if ("furnace_stages" in update && update.furnace_stages != null && ![1, 2].includes(Number(update.furnace_stages))) {
+      return NextResponse.json({ ok: false, error: "Furnace stages must be 1 or 2." }, { status: 400 })
     }
 
     // Evergy RTOU confirmation checkbox.

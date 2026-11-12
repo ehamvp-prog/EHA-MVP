@@ -15,15 +15,18 @@ import type { SeasonMode, ThermostatMode } from "@/lib/engine/heating/operating-
 
 export const SITE_ID = "default"
 
-// system_profile.furnace_signature is jsonb. Accept it only when every value
-// is a finite number; otherwise return null so the engine uses the default.
+// system_profile.furnace_signature is jsonb. Accept it when the bands the
+// decoder can't do without are real numbers (others may be null, plus the
+// commissioned flag and learn timestamps); otherwise use the default.
+// (The old check required EVERY value to be a number, so a signature with
+// `commissioned: false` or a null band was silently ignored.)
 function parseFurnaceSignature(raw: unknown): FurnaceSignature | null {
   const obj = typeof raw === "string" ? safeJson(raw) : raw
   if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null
-  const entries = Object.entries(obj as Record<string, unknown>)
-  if (entries.length === 0) return null
-  if (!entries.every(([, v]) => typeof v === "number" && Number.isFinite(v))) return null
-  return obj as FurnaceSignature
+  const o = obj as Record<string, unknown>
+  const required = ["idle_max_w", "fan_only_w", "inducer_only_w", "ignition_min_w", "tolerance_pct"]
+  if (!required.every((k) => typeof o[k] === "number" && Number.isFinite(o[k] as number))) return null
+  return o as unknown as FurnaceSignature
 }
 
 function safeJson(s: string): unknown {
