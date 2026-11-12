@@ -9,6 +9,14 @@ import { SavingsSection } from "./savings-section"
 import { ComfortChart } from "./comfort-chart"
 import { EfficiencyChart } from "./efficiency-chart"
 import { FilterHealthCard } from "./filter-health-card"
+import { ModeToggle, useTileMode, type TileMode } from "./mode-toggle"
+import {
+  TemperatureRiseCard,
+  FurnaceCyclesCard,
+  HeatingEfficiencyChart,
+  useHeatingSummary,
+  type HeatingLive,
+} from "./heating-tiles"
 import { chicagoParts } from "@/lib/chicago-time"
 import { touPeriodFor } from "@/lib/engine/cost"
 
@@ -27,11 +35,13 @@ type Computed = {
   rate_per_kwh: number
   outdoor_temp_f: number | null
   efficiency_color: string
-  system_state: "cooling" | "fan_only" | "off" | "fault"
+  system_state: "cooling" | "heating" | "fan_only" | "off" | "fault"
   system_running: boolean
   sensor_faults: { code: string; severity: "warn" | "fault"; message: string }[]
-  diagnostics: { ratedSeer2: number | null }
-}
+  season_mode: TileMode | null
+  mode_disagreements: { code: string; message: string }[] | null
+  diagnostics: { ratedSeer2: number | null } & HeatingLive["diagnostics"]
+} & Omit<HeatingLive, "diagnostics" | "supply_temp_f" | "return_temp_f">
 
 function money(n: number | null | undefined, digits = 2): string {
   if (n == null || !Number.isFinite(n)) return "—"
@@ -46,6 +56,11 @@ function systemStatus(c: Computed | undefined): { title: string; tone: string; d
   const hardFault = c.sensor_faults?.some((f) => f.severity === "fault")
   if (c.system_state === "fault" && hardFault)
     return { title: "Something looks off — tap for details", tone: "text-warn", dot: "bg-warn" }
+  const noLight = c.mode_disagreements?.find((d) => d.code === "stat_heating_no_heat")
+  if (noLight)
+    return { title: "Thermostat is calling for heat but nothing is lighting", tone: "text-orange", dot: "bg-orange" }
+  if (c.operating_mode === "heating")
+    return { title: "Your system is on and heating", tone: "text-muted-foreground", dot: "bg-orange" }
   if (c.system_state === "cooling")
     return { title: "Your system is on and cooling", tone: "text-muted-foreground", dot: "bg-ok" }
   if (c.system_state === "fan_only")
@@ -54,8 +69,9 @@ function systemStatus(c: Computed | undefined): { title: string; tone: string; d
 }
 
 // Humidity → a nature comparison, driven by the live indoor RH value.
-function humidityComfort(rh: number | null): { label: string; tone: string } {
+function humidityComfort(rh: number | null, heating = false): { label: string; tone: string } {
   if (rh == null) return { label: "Humidity unavailable", tone: "text-muted-foreground" }
+  if (heating && rh < 30) return { label: "Dry — winter air, a humidifier would help", tone: "text-warn" }
   if (rh < 30) return { label: "Dry — like crisp desert air", tone: "text-accent" }
   if (rh < 45) return { label: "Comfortable — like a mountain morning", tone: "text-ok" }
   if (rh < 55) return { label: "Comfortable — like fresh spring air", tone: "text-ok" }
@@ -65,9 +81,15 @@ function humidityComfort(rh: number | null): { label: string; tone: string } {
 }
 
 // Outdoor reassurance copy pulled from the live outdoor temp.
-function outdoorMessage(t: number | null): string {
+function outdoorMessage(t: number | null, heating = false): string {
   if (t == null) return "Outdoor conditions are unavailable right now."
   const r = Math.round(t)
+  if (heating) {
+    if (r <= 20) return `It's ${r}°F outside. Your furnace is working hard today — that's completely normal in this cold.`
+    if (r <= 35) return `It's ${r}°F outside. Your furnace is working hard today — that's normal for this cold.`
+    if (r <= 50) return `It's ${r}°F outside — a cool day your furnace handles comfortably.`
+    return `It's ${r}°F outside — mild conditions, an easy day for your furnace.`
+  }
   if (r >= 95) return `It's ${r}°F outside. Your system is working hard today — that's completely normal in this heat.`
   if (r >= 85) return `It's ${r}°F outside. Your system is working hard today — that's normal for this heat.`
   if (r >= 70) return `It's ${r}°F outside — a warm day your system handles comfortably.`
@@ -105,8 +127,20 @@ export function HomeView() {
   const [subTab, setSubTab] = useState<"home" | "comfort">("home")
   const c = data?.computed
 
+  const detected: TileMode | null = c?.season_mode ?? null
+  const [tileMode, setTileMode] = useTileMode(detected)
+  const heatTiles = tileMode === "heating"
+  const { data: heat } = useHeatingSummary()
+
   const status = systemStatus(c)
-  const humidity = humidityComfort(c?.return_rh ?? null)
+  const humidity = humidityComfort(c?.return_rh ?? null, heatTiles)
+
+  // Spending: electric always; gas added on the heating tiles.
+  const gasNow = c?.gas_cost_per_hour ?? null
+  const rightNow =
+    heatTiles && gasNow != null && c?.cost_per_hour != null ? c.cost_per_hour + gasNow : c?.cost_per_hour ?? null
+  const plus = (a: number | null | undefined, b: number | null | undefined) =>
+    a == null ? null : a + (heatTiles ? (b ?? 0) : 0)
 
   return (
     <div className="flex flex-col gap-4">
@@ -141,6 +175,9 @@ export function HomeView() {
             systemRunning={!!c?.system_running}
           />
 
+          {/* Heat | Cool — VIEW ONLY. Picks which tiles show below. Never touches the thermostat. */}
+          <ModeToggle detected={detected} shown={tileMode} onChange={setTileMode} />
+
           {/* 2. Savings — measured value, kept high while attention is fresh.
               The Automation Journal now lives inside this card, at its bottom. */}
           <SavingsSection />
@@ -149,13 +186,20 @@ export function HomeView() {
       <div className="rounded-2xl border border-border bg-card p-5 shadow-lg shadow-black/40">
         <SectionHeader icon={<DollarSign className="h-5 w-5 text-ok" />} title="What you're spending" />
         <div className="grid grid-cols-3 gap-3">
-          <CostTile label="Right now" value={c?.cost_per_hour != null ? `${money(c.cost_per_hour)}` : "—"} sub="per hour" big />
-          <CostTile label="This week" value={money(history?.week_to_date)} sub="energy used" />
-          <CostTile label="This month" value={money(cost?.total_with_base_charge)} sub="so far" />
+          <CostTile label="Right now" value={rightNow != null ? `${money(rightNow)}` : "—"} sub="per hour" big />
+          <CostTile label="This week" value={money(plus(history?.week_to_date, heat?.week.gas_cost))} sub="energy used" />
+          <CostTile label="This month" value={money(plus(cost?.total_with_base_charge, heat?.month.gas_cost))} sub="so far" />
         </div>
         <p className="mt-3 text-center text-xs text-muted-foreground">
           Includes your {money(cost?.customer_charge)} monthly Evergy base charge.
         </p>
+        {heatTiles ? (
+          <p className="mt-1 text-center text-xs text-muted-foreground">
+            {heat?.rated.gas_rate_per_therm != null
+              ? `Gas added at your $${heat.rated.gas_rate_per_therm.toFixed(2)}/therm from the gas bill.`
+              : "Gas cost shows once the gas rate and meter clock are entered in Setup. Electric only for now."}
+          </p>
+        ) : null}
 
         {/* Collapsible daily history */}
         <button
@@ -177,8 +221,12 @@ export function HomeView() {
           {/* 4. Comfort history — standalone chart, proves comfort held while saving */}
           <ComfortChart />
 
-          {/* 5. Efficiency history — measured EER against nameplate, minute by minute */}
-          <EfficiencyChart />
+          {/* 5. Efficiency history — cooling: measured SEER2 vs rated; heating: furnace efficiency vs AFUE */}
+          {heatTiles ? <HeatingEfficiencyChart live={c} summary={heat} /> : <EfficiencyChart />}
+
+          {/* 6. Heating only — temperature rise and furnace cycles */}
+          {heatTiles ? <TemperatureRiseCard live={c} summary={heat} /> : null}
+          {heatTiles ? <FurnaceCyclesCard live={c} summary={heat} /> : null}
 
           {/* 7. Filter health — needle gauge driven by filter LOAD ratio */}
           <FilterHealthCard staticInWc={c?.static_pressure_inwc ?? null} />
@@ -191,11 +239,11 @@ export function HomeView() {
             <SectionHeader icon={<Thermometer className="h-5 w-5 text-primary" />} title="Air & Conditions" />
             <div className="grid grid-cols-2 gap-3">
               <TempTile
-                label="Cool air coming out"
+                label={heatTiles ? "Warm air coming out" : "Cool air coming out"}
                 value={c?.supply_temp_f != null ? `${Math.round(c.supply_temp_f)}°F` : "—"}
               />
               <TempTile
-                label="Warm air going in"
+                label={heatTiles ? "Cool air going in" : "Warm air going in"}
                 value={c?.return_temp_f != null ? `${Math.round(c.return_temp_f)}°F` : "—"}
               />
             </div>
@@ -208,7 +256,7 @@ export function HomeView() {
               <div className="min-w-0">
                 <p className="text-xs uppercase tracking-wider text-muted">Outside your home</p>
                 <p className="mt-1 text-sm text-muted-foreground text-pretty">
-                  {outdoorMessage(c?.outdoor_temp_f ?? null)}
+                  {outdoorMessage(c?.outdoor_temp_f ?? null, heatTiles)}
                 </p>
               </div>
             </div>
