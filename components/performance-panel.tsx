@@ -22,7 +22,13 @@ type Computed = {
   weather_confidence: string | null
   efficiency_color: string
   system_running: boolean
-  system_state: "cooling" | "fan_only" | "off" | "fault"
+  system_state: "cooling" | "heating" | "fan_only" | "off" | "fault"
+  operating_mode?: string
+  temp_rise_f?: number | null
+  delivered_btuh?: number | null
+  live_thermal_eff_pct?: number | null
+  blower_watts?: number | null
+  mode_disagreements?: { code: string; message: string }[] | null
   cooling_delta_f: number | null
   sensor_faults: { code: string; severity: "warn" | "fault"; message: string }[]
   diagnostics: {
@@ -31,7 +37,21 @@ type Computed = {
     coilStateNote: string
     airflowNote: string
     systemStateNote: string
+    efficiencyGrade?: string | null
+    efficiencyNote?: string | null
+    furnaceNote?: string
+    riseNote?: string | null
   }
+}
+
+// Heating verdict from the furnace efficiency grade.
+const HEAT_VERDICT: Record<string, { accent: "ok" | "warn" | "orange" | "bad" | "primary"; dot: string; title: string }> = {
+  on_rating: { accent: "ok", dot: "bg-ok glow-ok", title: "Furnace running on its rating" },
+  slightly_below: { accent: "warn", dot: "bg-warn glow-warn", title: "Furnace slightly below its rating" },
+  below: { accent: "orange", dot: "bg-orange glow-orange", title: "Furnace below its rating" },
+  well_below: { accent: "bad", dot: "bg-bad glow-bad", title: "Furnace well below its rating" },
+  over_reading: { accent: "primary", dot: "bg-accent", title: "Reading higher than possible" },
+  unknown: { accent: "primary", dot: "bg-primary glow-primary", title: "Furnace heating — measuring" },
 }
 
 // Maps an efficiency_color verdict to a gauge/accent + plain-language copy.
@@ -96,6 +116,20 @@ export function PerformancePanel() {
           ? { ...VERDICT.unknown, sub: `The system is actively cooling, but efficiency can't be scored yet — ${c.diagnostics.airflowNote}.` }
           : VERDICT[c?.efficiency_color ?? "learning"] ?? VERDICT.learning
 
+  const heating = c?.operating_mode === "heating"
+  const heatVerdict = heating
+    ? {
+        ...(HEAT_VERDICT[c?.diagnostics?.efficiencyGrade ?? "unknown"] ?? HEAT_VERDICT.unknown),
+        sub:
+          c?.diagnostics?.efficiencyNote ??
+          c?.diagnostics?.riseNote ??
+          c?.diagnostics?.furnaceNote ??
+          "Efficiency needs the gas meter clocked in Setup.",
+      }
+    : null
+  const shownVerdict = heatVerdict && !(c?.system_state === "fault" && hasHardFault) ? heatVerdict : verdict
+  const disagreements = c?.mode_disagreements ?? []
+
   const tons = c?.capacity_btuh != null ? c.capacity_btuh / 12000 : null
   const eer = c?.live_eer ?? null
   const seer2 = c?.measured_seer2_estimate ?? null
@@ -107,13 +141,13 @@ export function PerformancePanel() {
       <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-lg shadow-black/40">
         <div className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-4">
-            <span className={`h-4 w-4 shrink-0 rounded-full ${verdict.dot}`} aria-hidden />
+            <span className={`h-4 w-4 shrink-0 rounded-full ${shownVerdict.dot}`} aria-hidden />
             <div>
               <p className="font-mono text-xs uppercase tracking-[0.2em] text-muted">
                 Efficiency Verdict
               </p>
-              <h2 className="text-xl font-semibold text-foreground text-balance">{verdict.title}</h2>
-              <p className="mt-1 max-w-md text-sm text-muted-foreground text-pretty">{verdict.sub}</p>
+              <h2 className="text-xl font-semibold text-foreground text-balance">{shownVerdict.title}</h2>
+              <p className="mt-1 max-w-md text-sm text-muted-foreground text-pretty">{shownVerdict.sub}</p>
             </div>
           </div>
           <div className="flex items-center gap-6 sm:flex-col sm:items-end sm:gap-1">
@@ -160,11 +194,31 @@ export function PerformancePanel() {
         </ul>
       ) : null}
 
+      {disagreements.length > 0 ? (
+        <ul className="flex flex-col gap-2" aria-label="Thermostat vs sensors">
+          {disagreements.map((d) => (
+            <li key={d.code} className="flex items-start gap-3 rounded-xl border border-orange/40 bg-orange/10 px-4 py-3 text-sm text-foreground">
+              <span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full bg-orange glow-orange" aria-hidden />
+              <span className="text-pretty">
+                <span className="font-semibold">Thermostat and sensors disagree:</span> {d.message}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
       {/* Performance gauges */}
       <div className="rounded-2xl border border-border bg-card p-4 shadow-lg shadow-black/40">
         <h3 className="mb-3 text-sm font-semibold text-foreground">Live Performance</h3>
         {isLoading ? (
           <p className="py-10 text-center text-sm text-muted">Computing…</p>
+        ) : heating ? (
+          <div className="flex flex-wrap items-start justify-center gap-5">
+            <RadialGauge value={c?.live_thermal_eff_pct ?? 0} min={0} max={100} label="Live efficiency" unit="%" accent={shownVerdict.accent} />
+            <RadialGauge value={c?.delivered_btuh != null ? c.delivered_btuh / 1000 : 0} min={0} max={100} label="Heat delivered" unit="MBH" accent="orange" />
+            <RadialGauge value={c?.temp_rise_f ?? 0} min={0} max={80} label="Temperature rise" unit="°F" accent="warn" />
+            <RadialGauge value={c?.blower_watts != null ? c.blower_watts / 1000 : 0} min={0} max={1} label="Furnace power" unit="kW" accent="accent" />
+          </div>
         ) : (
           <div className="flex flex-wrap items-start justify-center gap-5">
             <RadialGauge
@@ -199,7 +253,7 @@ export function PerformancePanel() {
             />
           </div>
         )}
-        {c && (eer == null || tons == null) ? (
+        {c && !heating && (eer == null || tons == null) ? (
           <p className="mt-3 rounded-lg border border-border bg-elevated px-3 py-2 text-center text-xs text-muted">
             {c.diagnostics?.airflowNote ?? "Waiting for the readings needed to compute efficiency."}
           </p>

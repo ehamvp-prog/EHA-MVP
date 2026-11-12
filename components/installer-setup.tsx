@@ -5,6 +5,7 @@ import useSWR from "swr"
 import Link from "next/link"
 import { Lock, Unlock } from "lucide-react"
 import { FilterCalibrationWorkflow } from "./filter-health-card"
+import { MeterClock, FurnaceSignaturePanel } from "./furnace-setup"
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
 
@@ -165,6 +166,20 @@ const FIELD_KEYS = [
   "auto_comfort_temp_max_f",
   "peak_dodger_precool_offset_f",
   "peak_dodger_coast_offset_f",
+  // The Furnace (heating)
+  "gas_type",
+  "gas_heating_value_btu_per_cuft",
+  "gas_rate_per_therm",
+  "furnace_stages",
+  "furnace_input_nameplate_btuh",
+  "furnace_input_low_fire_btuh",
+  "furnace_input_high_fire_btuh",
+  "furnace_afue_rated_pct",
+  "furnace_rise_min_f",
+  "furnace_rise_max_f",
+  "heat_blower_speed_tap",
+  "heat_cfm",
+  "supply_limit_f",
 ] as const
 
 // Automation enrollment toggles (booleans, default OFF).
@@ -172,6 +187,7 @@ const TOGGLE_KEYS = [
   "auto_comfort_enabled",
   "auto_comfort_fan_enabled",
   "peak_dodger_enabled",
+  "furnace_condensing",
 ] as const
 
 export function InstallerSetup() {
@@ -440,6 +456,180 @@ export function InstallerSetup() {
             onChange={set}
             disabled={locked}
           />
+        </Section>
+
+        <Section
+          title="The Furnace (heating)"
+          blurb="What the furnace burns and how much. The gas input is clocked at the meter — the sticker number is only a fallback. Every heating efficiency number on the Home screen is measured against these."
+        >
+          <Select
+            label="Gas type"
+            hint="Propane carries about 2.4 times the heat per cubic foot. Picking the wrong one throws every efficiency number off by that much."
+            name="gas_type"
+            value={v("gas_type")}
+            onChange={set}
+            disabled={locked}
+            options={[
+              { value: "natural_gas", label: "Natural gas" },
+              { value: "propane", label: "Propane" },
+            ]}
+          />
+          <Field
+            label="Gas heating value (optional)"
+            hint="From the gas bill, if it lists one. Leave blank for the standard 1,030 (natural gas) or 2,516 (propane)."
+            name="gas_heating_value_btu_per_cuft"
+            type="number"
+            unit="BTU/ft³"
+            placeholder="e.g. 1030"
+            value={v("gas_heating_value_btu_per_cuft")}
+            onChange={set}
+            disabled={locked}
+          />
+          <Field
+            label="Gas price"
+            hint="What the gas bill charges per therm, all-in. Used for the gas cost on the Home screen."
+            name="gas_rate_per_therm"
+            type="number"
+            unit="$/therm"
+            placeholder="e.g. 1.25"
+            value={v("gas_rate_per_therm")}
+            onChange={set}
+            disabled={locked}
+          />
+          <Select
+            label="Furnace stages"
+            hint="Single-stage burns at one rate. Two-stage has a low and a high fire."
+            name="furnace_stages"
+            value={v("furnace_stages")}
+            onChange={set}
+            disabled={locked}
+            options={[
+              { value: "1", label: "Single stage" },
+              { value: "2", label: "Two stage" },
+            ]}
+          />
+          <Field
+            label="Input on the sticker"
+            hint="Fallback only, until the meter is clocked."
+            name="furnace_input_nameplate_btuh"
+            type="number"
+            unit="BTU/h"
+            placeholder="e.g. 80000"
+            value={v("furnace_input_nameplate_btuh")}
+            onChange={set}
+            disabled={locked}
+          />
+          <Field
+            label="Rated AFUE"
+            hint="The efficiency percent on the furnace sticker."
+            name="furnace_afue_rated_pct"
+            type="number"
+            unit="%"
+            placeholder="e.g. 80"
+            value={v("furnace_afue_rated_pct")}
+            onChange={set}
+            disabled={locked}
+          />
+          <Field
+            label={v("furnace_stages") === "2" ? "Clocked input — high fire" : "Clocked input"}
+            hint="Real gas input measured at the meter. Use the helper below, or type it in."
+            name="furnace_input_high_fire_btuh"
+            type="number"
+            unit="BTU/h"
+            placeholder="e.g. 78500"
+            value={v("furnace_input_high_fire_btuh")}
+            onChange={set}
+            disabled={locked}
+          />
+          <MeterClock
+            label={v("furnace_stages") === "2" ? "Clock the meter — high fire" : "Clock the meter"}
+            gasType={v("gas_type")}
+            heatingValue={v("gas_heating_value_btu_per_cuft")}
+            onUse={(b) => set("furnace_input_high_fire_btuh", String(b))}
+            disabled={locked}
+          />
+          {v("furnace_stages") === "2" ? (
+            <>
+              <Field
+                label="Clocked input — low fire"
+                hint="Real gas input on low fire."
+                name="furnace_input_low_fire_btuh"
+                type="number"
+                unit="BTU/h"
+                placeholder="e.g. 52000"
+                value={v("furnace_input_low_fire_btuh")}
+                onChange={set}
+                disabled={locked}
+              />
+              <MeterClock
+                label="Clock the meter — low fire"
+                gasType={v("gas_type")}
+                heatingValue={v("gas_heating_value_btu_per_cuft")}
+                onUse={(b) => set("furnace_input_low_fire_btuh", String(b))}
+                disabled={locked}
+              />
+            </>
+          ) : null}
+          <Field
+            label="Rise range — low end"
+            hint="From the furnace sticker, e.g. the 35 in “Rise 35–65°F”."
+            name="furnace_rise_min_f"
+            type="number"
+            unit="°F"
+            placeholder="e.g. 35"
+            value={v("furnace_rise_min_f")}
+            onChange={set}
+            disabled={locked}
+          />
+          <Field
+            label="Rise range — high end"
+            hint="The 65 in “Rise 35–65°F”."
+            name="furnace_rise_max_f"
+            type="number"
+            unit="°F"
+            placeholder="e.g. 65"
+            value={v("furnace_rise_max_f")}
+            onChange={set}
+            disabled={locked}
+          />
+          <Field
+            label="Heat blower speed tap"
+            hint="Which tap the heat speed is wired to. Often different from cooling."
+            name="heat_blower_speed_tap"
+            placeholder="e.g. tap 3"
+            value={v("heat_blower_speed_tap")}
+            onChange={set}
+            disabled={locked}
+          />
+          <Field
+            label="Heat airflow (CFM)"
+            hint="From the furnace's blower table for that tap. Blank = uses the cooling airflow."
+            name="heat_cfm"
+            type="number"
+            unit="CFM"
+            placeholder="e.g. 1000"
+            value={v("heat_cfm")}
+            onChange={set}
+            disabled={locked}
+          />
+          <Field
+            label="Supply air limit"
+            hint="Highest supply temperature that's OK. Automation never pushes heat that rides the high limit."
+            name="supply_limit_f"
+            type="number"
+            unit="°F"
+            placeholder="160"
+            value={v("supply_limit_f")}
+            onChange={set}
+            disabled={locked}
+          />
+          <Toggle
+            label="Condensing furnace"
+            hint="90%+ furnaces with PVC venting and a condensate drain."
+            checked={Boolean(toggles.furnace_condensing)}
+            onChange={(val) => { if (!locked) toggle("furnace_condensing", val) }}
+          />
+          <FurnaceSignaturePanel disabled={locked} />
         </Section>
 
         <Section

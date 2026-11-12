@@ -52,6 +52,12 @@ export interface FurnaceSignature {
   cooling_blower_w: number | null // blower at cooling tap (so we can tell it apart)
   tolerance_pct: number // band half-width as a fraction of the band center
   commissioned: boolean
+  // Measured-band mode (set when the signature is learned from a real trace).
+  // When ignition_w is present the decoder matches each band by its center
+  // instead of assuming the igniter is the biggest draw — on many furnaces
+  // (e.g. Goodman GM9S80) igniter + inducer is LESS than steady burn.
+  ignition_w?: number | null // inducer + hot-surface igniter
+  post_purge_blower_w?: number | null // blower alone on the heat-off delay
 }
 
 // Generic starting bands. These are NOT this site's numbers — commissioning
@@ -138,6 +144,8 @@ export function decodeFurnaceStep(
     return { stage: "idle", fire: "unknown", burnerOn: false, blowerOn: false, confidence: conf, note: "Furnace idle." }
   }
 
+  if (sig.ignition_w != null) return decodeByBands(prev, w, sig, conf, heatInDuct, residualHeat)
+
   // 2. Ignition: the HSI spike is the single biggest draw in the sequence.
   if (w >= sig.ignition_min_w) {
     return { stage: "ignition", fire: "unknown", burnerOn: false, blowerOn: false, confidence: conf, note: "Igniter energized — trial for ignition." }
@@ -180,6 +188,60 @@ export function decodeFurnaceStep(
     confidence: conf,
     note: heatInDuct
       ? `Unrecognized ${Math.round(w)} W on the furnace channel while heat is in the duct — commission the furnace signature.`
+      : `Unrecognized ${Math.round(w)} W on the furnace channel.`,
+  }
+}
+
+// Measured-band decoding. Each stage has its own watt band; where two stages
+// share a band (inducer alone before ignition vs. gas lit with the blower
+// still on its on-delay) the previous stage decides.
+function decodeByBands(
+  prev: FurnaceStage | null,
+  w: number,
+  sig: FurnaceSignature,
+  conf: FurnaceStepResult["confidence"],
+  heatInDuct: boolean,
+  residualHeat: boolean,
+): FurnaceStepResult {
+  const tol = sig.tolerance_pct
+  const afterBurn = prev === "burn" || prev === "post_purge" || prev === "ignition"
+
+  const fire = nearestFire(w, sig)
+  if (fire !== "unknown") {
+    return { stage: "burn", fire, burnerOn: true, blowerOn: true, confidence: conf, note: heatInDuct ? `Burning (${fire} fire).` : "Burning, heat not yet at the supply sensor." }
+  }
+  if (sig.ignition_w != null && within(w, sig.ignition_w, tol)) {
+    return { stage: "ignition", fire: "unknown", burnerOn: false, blowerOn: false, confidence: conf, note: "Igniter energized — trial for ignition." }
+  }
+  if (within(w, sig.inducer_only_w, tol)) {
+    if (prev === "ignition" || prev === "burn") {
+      // Gas lit, blower still waiting on its on-delay.
+      return { stage: "burn", fire: sig.burn_single_w != null ? "single" : "unknown", burnerOn: true, blowerOn: false, confidence: conf, note: "Burner lit, blower about to start." }
+    }
+    if (prev === "post_purge") {
+      return { stage: "post_purge", fire: "unknown", burnerOn: false, blowerOn: false, confidence: conf, note: "Inducer post-purge." }
+    }
+    return { stage: "prepurge", fire: "unknown", burnerOn: false, blowerOn: false, confidence: conf, note: "Inducer prepurge — call for heat received." }
+  }
+  if (sig.post_purge_blower_w != null && within(w, sig.post_purge_blower_w, tol)) {
+    if (afterBurn || residualHeat) {
+      return { stage: "post_purge", fire: "unknown", burnerOn: false, blowerOn: true, confidence: conf, note: "Gas off, blower running the exchanger down." }
+    }
+  }
+  if (within(w, sig.fan_only_w, tol)) {
+    if (residualHeat && afterBurn) {
+      return { stage: "post_purge", fire: "unknown", burnerOn: false, blowerOn: true, confidence: conf, note: "Gas off, blower running the exchanger down." }
+    }
+    return { stage: "fan_only", fire: "unknown", burnerOn: false, blowerOn: true, confidence: conf, note: "Blower circulating, no burner." }
+  }
+  return {
+    stage: "unknown",
+    fire: "unknown",
+    burnerOn: false,
+    blowerOn: w > sig.fan_only_w * 0.5,
+    confidence: conf,
+    note: heatInDuct
+      ? `Unrecognized ${Math.round(w)} W on the furnace channel while heat is in the duct.`
       : `Unrecognized ${Math.round(w)} W on the furnace channel.`,
   }
 }
