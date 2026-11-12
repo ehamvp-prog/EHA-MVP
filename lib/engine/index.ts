@@ -213,6 +213,12 @@ function guardCoolingCoast(
 ): FurnaceStepResult {
   if (furnace.stage !== "burn") return furnace
   if (riseF != null && riseF >= HEAT_RISE_MIN_F) return furnace
+  // Mid heat-call (inducer → igniter → burn) it IS a burn, even while the
+  // supply sensor still reads colder than the return — in winter the supply
+  // duct sits cold between cycles, so the first minutes of every burn look
+  // "cold". Without this the start of each cycle was thrown out and one
+  // cycle got split in two.
+  if (prevStage === "prepurge" || prevStage === "ignition" || prevStage === "burn") return furnace
   const coldNow = riseF != null && riseF <= COOL_DROP_MIN_F
   const coldBefore = prevRiseF != null && prevRiseF <= COOL_DROP_MIN_F
   if (prevStage !== "cooling_blower" && !coldNow && !coldBefore) return furnace
