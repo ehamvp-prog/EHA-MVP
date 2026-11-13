@@ -64,7 +64,14 @@ type ProfileRow = {
   cool_target_f: number
   sleep_heat_target_f: number
   sleep_cool_target_f: number
+  auto_limit_min_f: number
+  auto_limit_max_f: number
+  dry_rewarm_enabled: boolean
+  dry_rewarm_drop_f: number
 }
+
+// Automation limits stay at least this far apart.
+const LIMIT_GAP_F = 4
 
 // Auto (heat/cool changeover) keeps cool at least this far above heat.
 const BAND_F = 2
@@ -109,6 +116,10 @@ const DEFAULT_PROFILE: ProfileRow = {
   cool_target_f: 74,
   sleep_heat_target_f: 68,
   sleep_cool_target_f: 72,
+  auto_limit_min_f: 60,
+  auto_limit_max_f: 80,
+  dry_rewarm_enabled: true,
+  dry_rewarm_drop_f: 2,
 }
 
 const OCCUPANT_OPTIONS: { value: Occupant; label: string; sub: string }[] = [
@@ -284,6 +295,10 @@ export function ComfortProfilePanel() {
         cool_target_f: p.cool_target_f ?? (p.preferred_temp_f ?? 72) + BAND_F,
         sleep_heat_target_f: p.sleep_heat_target_f ?? p.sleep_target_f ?? p.preferred_temp_f ?? 68,
         sleep_cool_target_f: p.sleep_cool_target_f ?? (p.sleep_target_f ?? p.preferred_temp_f ?? 70) + BAND_F,
+        auto_limit_min_f: Number(p.auto_limit_min_f ?? 60),
+        auto_limit_max_f: Number(p.auto_limit_max_f ?? 80),
+        dry_rewarm_enabled: p.dry_rewarm_enabled ?? true,
+        dry_rewarm_drop_f: Number(p.dry_rewarm_drop_f ?? 2),
       })
     }
   }, [data, dirty])
@@ -304,6 +319,22 @@ export function ComfortProfilePanel() {
       } else {
         next[coolKey] = v
         if (next[heatKey] > v - BAND_F) next[heatKey] = v - BAND_F
+      }
+      return next
+    })
+    setDirty(true)
+  }
+
+  // Change one automation limit; the other moves if needed to keep the gap.
+  const setLimit = (side: "min" | "max", v: number) => {
+    setForm((f) => {
+      const next = { ...f }
+      if (side === "min") {
+        next.auto_limit_min_f = v
+        if (next.auto_limit_max_f < v + LIMIT_GAP_F) next.auto_limit_max_f = v + LIMIT_GAP_F
+      } else {
+        next.auto_limit_max_f = v
+        if (next.auto_limit_min_f > v - LIMIT_GAP_F) next.auto_limit_min_f = v - LIMIT_GAP_F
       }
       return next
     })
@@ -418,6 +449,75 @@ export function ComfortProfilePanel() {
           Heat and cool always stay at least {BAND_F}°F apart so the furnace and AC never fight each other.
           {form.sleep_enabled ? " Overnight numbers are under Sleep Schedule." : ""}
         </p>
+
+        <HeatCoolStatus />
+
+        {/* Automation limits */}
+        <p className="mt-4 text-sm font-semibold text-foreground">Automation limits</p>
+        <p className="text-xs text-muted text-pretty">
+          The app will never set the thermostat outside these, for any reason.
+        </p>
+        <div className="mt-2 grid grid-cols-2 gap-3">
+          <Stepper
+            label="Lowest"
+            icon={<Minus className="h-4 w-4 text-accent" />}
+            value={form.auto_limit_min_f}
+            min={50}
+            max={75}
+            onChange={(v) => setLimit("min", v)}
+          />
+          <Stepper
+            label="Highest"
+            icon={<Plus className="h-4 w-4 text-orange" />}
+            value={form.auto_limit_max_f}
+            min={60}
+            max={90}
+            onChange={(v) => setLimit("max", v)}
+          />
+        </div>
+        {[form.heat_target_f, form.cool_target_f].some(
+          (t) => t < form.auto_limit_min_f || t > form.auto_limit_max_f,
+        ) ? (
+          <p className="mt-2 rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn text-pretty">
+            A heat or cool number is outside the limits. The app will stop at the limit.
+          </p>
+        ) : null}
+
+        {/* Dry, then re-warm */}
+        <label className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-border bg-elevated px-4 py-3">
+          <div>
+            <p className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
+              <Droplets className="h-4 w-4 text-accent" /> Dry the air, then re-warm
+            </p>
+            <p className="text-xs text-muted text-pretty">
+              On Auto: when it&apos;s too humid inside but running the AC alone would make the house cold, the AC
+              dries the air down to your heat number and the heat is set a little lower as a backup.
+            </p>
+          </div>
+          <input
+            type="checkbox"
+            checked={form.dry_rewarm_enabled}
+            onChange={(e) => set("dry_rewarm_enabled", e.target.checked)}
+            className="h-5 w-5 shrink-0 accent-primary"
+            aria-label="Dry the air, then re-warm"
+          />
+        </label>
+        {form.dry_rewarm_enabled ? (
+          <div className="mt-3 grid grid-cols-2 items-center gap-3">
+            <Stepper
+              label="Heat backup"
+              icon={<Flame className="h-4 w-4 text-orange" />}
+              value={form.dry_rewarm_drop_f}
+              min={1}
+              max={4}
+              onChange={(v) => set("dry_rewarm_drop_f", v)}
+            />
+            <p className="text-xs text-muted text-pretty">
+              degrees under your heat number the house may drop while drying. Right now: heat comes on at{" "}
+              {Math.max(form.auto_limit_min_f, Math.round(form.heat_target_f) - form.dry_rewarm_drop_f)}°F.
+            </p>
+          </div>
+        ) : null}
       </Card>
 
       {/* Household Demographics */}
@@ -1470,6 +1570,31 @@ function TargetLine({
         <span className="ml-1 text-sm font-normal text-muted-foreground">/ {Math.round(target.targetRh)}%</span>
       </p>
       {limit ? <p className="mt-2 text-[12px] leading-snug text-muted-foreground text-pretty">{limit}</p> : null}
+    </div>
+  )
+}
+
+// What the heat/cool automation is doing right now (latest brain decision).
+function HeatCoolStatus() {
+  const { data } = useSWR<{ ok: boolean; at: string | null; text: string | null; drying: boolean }>(
+    "/api/comfort/heat-cool-status",
+    fetcher,
+    { refreshInterval: 60000 },
+  )
+  if (!data?.ok || !data.text) return null
+  const mins = data.at ? Math.max(0, Math.round((Date.now() - new Date(data.at).getTime()) / 60000)) : null
+  return (
+    <div
+      className={`mt-3 rounded-xl border px-3 py-2.5 text-xs text-pretty ${
+        data.drying ? "border-accent/40 bg-accent/10 text-foreground" : "border-border bg-elevated text-muted"
+      }`}
+    >
+      <p className="mb-0.5 flex items-center gap-1.5 font-semibold text-foreground">
+        {data.drying ? <Droplets className="h-3.5 w-3.5 text-accent" /> : <Gauge className="h-3.5 w-3.5 text-muted" />}
+        Right now
+        {mins != null ? <span className="font-normal text-muted">· {mins < 1 ? "just now" : `${mins} min ago`}</span> : null}
+      </p>
+      {data.text}
     </div>
   )
 }
