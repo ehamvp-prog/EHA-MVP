@@ -13,6 +13,7 @@ type Point = {
   outdoor: number | null
   heatPerMin: number | null
   complete: boolean
+  counted: boolean
 }
 type Resp = {
   ok: boolean
@@ -23,9 +24,13 @@ type Resp = {
   reliable_days: number
   points: Point[]
   fit: { slope: number; intercept: number; r2: number; n: number } | null
+  line_outdoor: { slope: number; intercept: number } | null
   indoor_avg_f: number | null
+  counted_outdoor_range: [number, number] | null
   no_run_outdoor_f: number | null
   nonstop_outdoor_f: number | null
+  nonstop_source: "hourly" | "line" | null
+  not_counted_days: number
   yesterday: { day: string; actual: number; expected: number | null; pct: number | null; outdoor: number | null; indoor: number | null } | null
   last7: { days: number; actual: number; expected: number | null; pct: number | null }
   heat_per_min: { recent_btu: number | null; avg_btu: number | null } | null
@@ -124,17 +129,27 @@ export function WeatherLoadCard({ mode }: { mode: "heating" | "cooling" }) {
             <Stat
               label="Per degree"
               value={data.fit ? `${Math.round(data.fit.slope)} min` : "—"}
-              sub="more run time a day for each degree of difference"
+              sub={`more run time a day for each degree ${mode === "heating" ? "colder" : "hotter"} outside`}
             />
             <Stat
               label="Stops running"
               value={data.no_run_outdoor_f != null ? `${Math.round(data.no_run_outdoor_f)}°F` : "—"}
-              sub={`outside, the ${sys} isn't needed`}
+              sub={
+                data.no_run_outdoor_f != null
+                  ? `daily average outside, the ${sys} isn't needed`
+                  : `not enough mild days yet to tell`
+              }
             />
             <Stat
               label="Runs nonstop"
               value={data.nonstop_outdoor_f != null ? `${Math.round(data.nonstop_outdoor_f)}°F` : "—"}
-              sub="outside, it would run all day"
+              sub={
+                data.nonstop_source === "hourly"
+                  ? "outside, it runs the whole hour"
+                  : data.nonstop_source === "line"
+                    ? "daily average outside, it would run all day"
+                    : `hasn't been ${mode === "heating" ? "cold" : "hot"} enough yet to tell`
+              }
             />
           </div>
 
@@ -172,21 +187,20 @@ function Stat({ label, value, sub }: { label: string; value: string; sub: string
   )
 }
 
-// Dots = days (x: temperature difference, y: minutes run). Line = the fit.
-// Last 7 days are colored; yesterday is the big dot.
+// Dots = days (x: outdoor temperature, daily average; y: hours run).
+// Filled dots count toward the line; hollow dots are days with no real load
+// (cooling: cooler outside than in; heating: warmer outside than in).
+// Last 7 counted days are colored; yesterday is the big dot.
 function ScatterChart({ data, accent }: { data: Resp; accent: string }) {
-  // Heat: only days colder outside than in. Cool: only days with run time or warmer outside.
-  const pts = data.points.filter(
-    (p) => p.complete && p.deltaT != null && (data.mode === "heating" ? p.deltaT > 0 : p.run > 0 || p.deltaT > 0),
-  )
+  const pts = data.points.filter((p) => p.complete && p.outdoor != null && (p.run > 0 || p.counted))
   if (pts.length < 2) return null
   const W = 340
-  const H = 190
+  const H = 200
   const ml = 34
   const mr = 8
   const mt = 10
   const mb = 30
-  const xs = pts.map((p) => p.deltaT!)
+  const xs = pts.map((p) => p.outdoor!)
   const ys = pts.map((p) => p.run)
   let x0 = Math.floor(Math.min(...xs) / 5) * 5
   let x1 = Math.ceil(Math.max(...xs) / 5) * 5
@@ -195,62 +209,79 @@ function ScatterChart({ data, accent }: { data: Resp; accent: string }) {
     x1 += 5
   }
   const yMaxRaw = Math.max(60, ...ys)
-  // Round the top to a clean step: whole hours, or 6-hour steps on busy days.
   const step = yMaxRaw > 360 ? 360 : 60
-  const y1 = Math.ceil(yMaxRaw / step) * step
+  const y1 = Math.min(1440, Math.ceil(yMaxRaw / step) * step)
   const px = (x: number) => ml + ((x - x0) / (x1 - x0)) * (W - ml - mr)
-  const py = (y: number) => H - mb - (y / y1) * (H - mt - mb)
-  const recent = new Set(pts.slice(-7).map((p) => p.day))
-  const last = pts[pts.length - 1]
+  const py = (y: number) => H - mb - (Math.min(y, y1) / y1) * (H - mt - mb)
+  const counted = pts.filter((p) => p.counted)
+  const recent = new Set(counted.slice(-7).map((p) => p.day))
+  const last = counted[counted.length - 1]
 
+  // Draw the line only across the outdoor temps actually counted.
+  const lo = data.line_outdoor
+  const range = data.counted_outdoor_range
   const line =
-    data.fit && data.fit.slope > 0
+    lo && range
       ? (() => {
-          const f = (x: number) => data.fit!.slope * x + data.fit!.intercept
-          const a = Math.max(x0, -data.fit!.intercept / data.fit!.slope)
-          const b = x1
+          const f = (x: number) => Math.max(0, Math.min(1440, lo.slope * x + lo.intercept))
+          const a = Math.max(x0, range[0])
+          const b = Math.min(x1, range[1])
           if (b <= a) return null
-          return { xa: px(a), ya: py(Math.min(y1, Math.max(0, f(a)))), xb: px(b), yb: py(Math.min(y1, Math.max(0, f(b)))) }
+          return { xa: px(a), ya: py(f(a)), xb: px(b), yb: py(f(b)) }
         })()
       : null
 
   const yTicks = [0, y1 / 2, y1]
-  const xTicks = [x0, Math.round((x0 + x1) / 2), x1]
-  const xLabel = data.mode === "heating" ? "Inside minus outside (°F), daily average" : "Outside minus inside (°F), daily average"
+  const xTicks = [x0, Math.round((x0 + x1) / 2 / 5) * 5, x1]
+  const notCountedLabel = data.mode === "heating" ? "warmer outside than inside" : "cooler outside than inside"
+  const hasHollow = pts.some((p) => !p.counted)
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="mt-3 w-full" role="img" aria-label="Daily run time against temperature difference" style={{ height: "auto" }}>
-      {yTicks.map((t) => (
-        <g key={`y${t}`}>
-          <line x1={ml} x2={W - mr} y1={py(t)} y2={py(t)} stroke="var(--color-border)" strokeWidth={1} />
-          <text x={ml - 4} y={py(t) + 3} textAnchor="end" fontSize={9} fill="var(--color-muted)">
-            {t >= 60 ? `${Math.round(t / 60)}h` : `${t}m`}
+    <>
+      <svg viewBox={`0 0 ${W} ${H}`} className="mt-3 w-full" role="img" aria-label="Daily run time against outdoor temperature" style={{ height: "auto" }}>
+        {yTicks.map((t) => (
+          <g key={`y${t}`}>
+            <line x1={ml} x2={W - mr} y1={py(t)} y2={py(t)} stroke="var(--color-border)" strokeWidth={1} />
+            <text x={ml - 4} y={py(t) + 3} textAnchor="end" fontSize={9} fill="var(--color-muted)">
+              {t >= 60 ? `${Math.round(t / 60)}h` : `${t}m`}
+            </text>
+          </g>
+        ))}
+        {xTicks.map((t) => (
+          <text key={`x${t}`} x={px(t)} y={H - mb + 12} textAnchor="middle" fontSize={9} fill="var(--color-muted)">
+            {t}°
           </text>
-        </g>
-      ))}
-      {xTicks.map((t) => (
-        <text key={`x${t}`} x={px(t)} y={H - mb + 12} textAnchor="middle" fontSize={9} fill="var(--color-muted)">
-          {t}°
+        ))}
+        <text x={(ml + W - mr) / 2} y={H - 4} textAnchor="middle" fontSize={9} fill="var(--color-muted)">
+          Outside temperature (°F), daily average
         </text>
-      ))}
-      <text x={(ml + W - mr) / 2} y={H - 4} textAnchor="middle" fontSize={9} fill="var(--color-muted)">
-        {xLabel}
-      </text>
-      {line ? <line x1={line.xa} y1={line.ya} x2={line.xb} y2={line.yb} stroke={accent} strokeWidth={2} strokeDasharray="5 4" /> : null}
-      {pts.map((p) => (
-        <circle
-          key={p.day}
-          cx={px(p.deltaT!)}
-          cy={py(p.run)}
-          r={p.day === last.day ? 5 : 3}
-          fill={recent.has(p.day) ? accent : "var(--color-muted)"}
-          fillOpacity={recent.has(p.day) ? 0.95 : 0.45}
-          stroke={p.day === last.day ? "var(--color-foreground)" : "none"}
-          strokeWidth={1.5}
-        >
-          <title>{`${p.day}: ran ${Math.round(p.run)} min, ${p.outdoor != null ? Math.round(p.outdoor) : "?"}°F outside`}</title>
-        </circle>
-      ))}
-    </svg>
+        {line ? <line x1={line.xa} y1={line.ya} x2={line.xb} y2={line.yb} stroke={accent} strokeWidth={2} strokeDasharray="5 4" /> : null}
+        {pts.map((p) =>
+          p.counted ? (
+            <circle
+              key={p.day}
+              cx={px(p.outdoor!)}
+              cy={py(p.run)}
+              r={last && p.day === last.day ? 5 : 3}
+              fill={recent.has(p.day) ? accent : "var(--color-muted)"}
+              fillOpacity={recent.has(p.day) ? 0.95 : 0.5}
+              stroke={last && p.day === last.day ? "var(--color-foreground)" : "none"}
+              strokeWidth={1.5}
+            >
+              <title>{`${p.day}: ran ${hm(p.run)}, ${Math.round(p.outdoor!)}°F outside`}</title>
+            </circle>
+          ) : (
+            <circle key={p.day} cx={px(p.outdoor!)} cy={py(p.run)} r={3} fill="none" stroke="var(--color-muted)" strokeOpacity={0.6} strokeWidth={1}>
+              <title>{`${p.day}: ran ${hm(p.run)}, ${Math.round(p.outdoor!)}°F outside — not counted (${notCountedLabel})`}</title>
+            </circle>
+          ),
+        )}
+      </svg>
+      {hasHollow ? (
+        <p className="mt-1 text-center text-[10px] text-muted">
+          Hollow dots = days {notCountedLabel}. Not counted in the line.
+        </p>
+      ) : null}
+    </>
   )
 }
