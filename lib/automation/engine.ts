@@ -259,9 +259,11 @@ async function confirmPending(
     .maybeSingle()
   if (!pending) return
 
-  const cmd = (pending.command_sent ?? {}) as { coolSetpoint?: number; fan?: string }
+  const cmd = (pending.command_sent ?? {}) as { coolSetpoint?: number; heatSetpoint?: number; fan?: string }
   let confirmed = false
-  if (typeof cmd.coolSetpoint === "number" && thermostat.coolSetpointF != null) {
+  if (typeof cmd.heatSetpoint === "number" && thermostat.heatSetpointF != null) {
+    confirmed = Math.abs(thermostat.heatSetpointF - cmd.heatSetpoint) <= CONFIRM_TOLERANCE_F
+  } else if (typeof cmd.coolSetpoint === "number" && thermostat.coolSetpointF != null) {
     confirmed = Math.abs(thermostat.coolSetpointF - cmd.coolSetpoint) <= CONFIRM_TOLERANCE_F
   } else if (cmd.fan === "ON") {
     confirmed = thermostat.fanMode === "ON"
@@ -280,7 +282,7 @@ async function confirmPending(
       after_state: {
         temp_f: thermostat.ambientTempF,
         rh: thermostat.humidity,
-        setpoint_f: thermostat.coolSetpointF,
+        setpoint_f: typeof cmd.heatSetpoint === "number" ? thermostat.heatSetpointF : thermostat.coolSetpointF,
         comfort_score: afterComfort,
       },
       est_comfort_delta:
@@ -449,7 +451,14 @@ export async function runAutomationTick(): Promise<TickResult> {
   const season = seasonForMonth(parts.month)
   const isWeekday = parts.weekday >= 1 && parts.weekday <= 5
   const holiday = isRtouHoliday(parts)
-  const coolingMode = thermostat?.mode === "COOL" || thermostat?.mode === "HEATCOOL"
+  // Which brain is in charge. In HEATCOOL the detected season decides, so the
+  // cooling brain never runs the AC to hit a target in winter and the heating
+  // brain never fires the furnace in summer.
+  const detectedSeason = bundle?.computed.season_mode ?? null
+  const coolingMode =
+    thermostat?.mode === "COOL" || (thermostat?.mode === "HEATCOOL" && detectedSeason !== "heating")
+  const heatingMode =
+    thermostat?.mode === "HEAT" || (thermostat?.mode === "HEATCOOL" && detectedSeason === "heating")
 
   // ---- Automation 2: Peak Dodger (time-critical, evaluated first) ----------
   // Balanced coasts only within the band: cap the warm-side setpoint at the
@@ -579,6 +588,66 @@ export async function runAutomationTick(): Promise<TickResult> {
       temp_error: Math.round(tempError),
       binding_constraint: sel.tempClampedBy ?? sel.rhClampedBy ?? null,
       sleep: inSleep,
+    }
+
+    // ---- HEATING (gas furnace): comfort only --------------------------------
+    // Gas has no peak hours (Kansas Gas Service bills monthly volume at one
+    // price), so there is no preheat / coast in heat. The furnace electric
+    // draw is ~350 W, worth pennies of peak shifting, and preheating makes a
+    // warm house leak heat faster — net loss. So the heating brain does one
+    // thing: keep the heat setpoint ON the household target (preferred by day,
+    // sleep target inside the sleep window). Direct-set, never stepped, never
+    // relaxed. The thermostat itself holds the temperature between ticks.
+    if (nestConnected && heatingMode && thermostat?.heatSetpointF != null) {
+      const setpoint = thermostat.heatSetpointF
+      const heatMin = Number(sys?.auto_heat_temp_min_f ?? 60)
+      const heatMax = Number(sys?.auto_heat_temp_max_f ?? 74)
+      const supplyLimitF = Number(sys?.supply_limit_f ?? 160)
+      const heatTargetF = inSleep ? sleepTargetF : inputs.preferred_temp_f
+      const clamp = clampSetpoint(heatTargetF, heatMin, heatMax)
+      const heatLog = { ...decisionLog, target: clamp.value, brain: "heating" }
+
+      if (Math.abs(clamp.value - setpoint) <= RESEND_THRESHOLD_F) {
+        await maybeHeartbeat(db, `heat set to your ${clamp.value}°F ${inSleep ? "sleep " : ""}target — holding`, before)
+        return { ran: false, action: null, detail: "heat at target" }
+      }
+
+      // Never push MORE heat through a furnace that's already running hot:
+      // a high rise or a supply near the limit means restricted airflow.
+      const live = bundle?.computed
+      const supplyHot =
+        live?.rise_verdict === "high" || (live?.supply_temp_f != null && live.supply_temp_f >= supplyLimitF)
+      if (clamp.value > setpoint && supplyHot) {
+        const wrote = await maybeRecommend(
+          db,
+          "heat_supply_hot",
+          `Supply air is running too hot (${live?.supply_temp_f != null ? Math.round(live.supply_temp_f) : "?"}°F) — airflow looks restricted. Check the filter and registers. Holding the heat setpoint at ${Math.round(setpoint)}°F instead of raising it.`,
+          before,
+        )
+        return wrote ? { ran: true, action: "recommendation" } : { ran: false, action: null, detail: "supply too hot, holding" }
+      }
+
+      if (inCooldown) {
+        await maybeHeartbeat(db, "in actuation cooldown (heat)", before)
+        return { ran: false, action: null, detail: "cooldown" }
+      }
+
+      if (thermostat.mode === "HEATCOOL") {
+        // Range mode needs both edges; keep the cool edge at least 3°F above.
+        const coolEdge = Math.max(thermostat.coolSetpointF ?? clamp.value + 3, clamp.value + 3)
+        await applyControl(token!, { heatSetpointF: clamp.value, coolSetpointF: coolEdge })
+      } else {
+        await applyControl(token!, { heatSetpointF: clamp.value })
+      }
+      await insertJournal(db, {
+        action_type: "comfort_adjust",
+        trigger_reason: `Heat setpoint ${Math.round(setpoint)}→${clamp.value}°F to hold your ${inSleep ? "sleep " : ""}target (indoor ${Math.round(realityTempF)}°F)${clamp.clamped ? ` — held at the ${clamp.value}°F heating ${clamp.reason === "above_max" ? "ceiling" : "floor"}` : ""}.`,
+        command_sent: { heatSetpoint: clamp.value, ...heatLog },
+        nest_confirmed: null,
+        before_state: { ...before, setpoint_f: setpoint },
+        est_savings_usd: 0,
+      })
+      return { ran: true, action: "comfort_adjust" }
     }
 
     if (nestConnected && coolingMode && thermostat?.coolSetpointF != null) {
