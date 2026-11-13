@@ -28,6 +28,10 @@ export interface KgsCostOfGas {
 
 // Pull the readable text out of a simple PDF: inflate every compressed stream
 // and collect the strings inside (...) — that's where Tj/TJ text lives.
+// Only page content streams (the ones with BT…ET text blocks) are read; font
+// files are skipped. Each string is kept as its own word: KGS draws "October
+// 2026" and "6.5839" as two strings on one row, and gluing them together
+// ("October 20266.5839") hides the price.
 export function pdfText(bytes: Buffer): string {
   const raw = bytes.toString("latin1")
   const chunks: string[] = []
@@ -37,6 +41,7 @@ export function pdfText(bytes: Buffer): string {
     const start = m.index + m[0].length
     const end = raw.indexOf("endstream", start)
     if (end < 0) break
+    re.lastIndex = end
     const body = bytes.subarray(start, end)
     let decoded: string
     try {
@@ -44,24 +49,27 @@ export function pdfText(bytes: Buffer): string {
     } catch {
       decoded = body.toString("latin1")
     }
+    if (!/\bBT\b/.test(decoded) || !/T[jJ]\b/.test(decoded)) continue
     const strings = decoded.match(/\((?:\\.|[^\\)])*\)/g)
-    if (strings) chunks.push(strings.map((x) => x.slice(1, -1).replace(/\\(.)/g, "$1")).join(""))
-    else chunks.push(decoded)
-    re.lastIndex = end
+    if (strings) chunks.push(strings.map((x) => x.slice(1, -1).replace(/\\(.)/g, "$1")).join(" "))
   }
   return chunks.join(" ").replace(/\s+/g, " ")
 }
 
-// Find the $/Mcf figure and the month it covers.
+// KGS posts a 12-month table: "<Month> <Year> <$/Mcf>" rows, oldest first.
+// The last row is the month being billed now.
 export function parseCostOfGas(text: string): { perMcf: number | null; period: string | null } {
-  // Natural gas cost of gas runs a few dollars per Mcf; KGS prints 4 decimals.
-  const nums = Array.from(text.matchAll(/\$?\s?(\d{1,2}\.\d{4})/g))
-    .map((x) => Number(x[1]))
-    .filter((n) => n >= 1 && n <= 40)
-  const monthRe = new RegExp(`(${MONTHS.join("|")})\\s*,?\\s*(20\\d{2})`, "i")
-  const pm = text.match(monthRe)
-  const period = pm ? `${pm[1][0].toUpperCase()}${pm[1].slice(1).toLowerCase()} ${pm[2]}` : null
-  return { perMcf: nums.length ? nums[0] : null, period }
+  const rowRe = new RegExp(`(${MONTHS.join("|")})\\s+(20\\d{2})\\s+\\$?\\s?(\\d{1,2}\\.\\d{4})\\b`, "gi")
+  const rows = Array.from(text.matchAll(rowRe))
+    .map((r) => ({ month: r[1], year: Number(r[2]), value: Number(r[3]) }))
+    .filter((r) => r.value >= 1 && r.value <= 40)
+  if (!rows.length) return { perMcf: null, period: null }
+  // Latest by date, not by position, in case the layout ever changes order.
+  const idx = (r: { month: string; year: number }) =>
+    r.year * 12 + MONTHS.findIndex((mm) => mm.toLowerCase() === r.month.toLowerCase())
+  const latest = rows.reduce((a, b) => (idx(b) >= idx(a) ? b : a))
+  const mo = latest.month[0].toUpperCase() + latest.month.slice(1).toLowerCase()
+  return { perMcf: latest.value, period: `${mo} ${latest.year}` }
 }
 
 export async function fetchKgsCostOfGas(): Promise<KgsCostOfGas> {
