@@ -10,6 +10,7 @@
 // =====================================================================
 
 import { NextResponse } from "next/server"
+import { withOemChart } from "@/lib/airflow/oem-chart"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { SITE_ID } from "@/lib/compute-reading"
 import { chicagoParts, chicagoWallClockToUtc } from "@/lib/chicago-time"
@@ -58,7 +59,7 @@ export async function GET() {
       supabase
         .from("system_profile")
         .select(
-          "furnace_afue_rated_pct, furnace_condensing, furnace_rise_min_f, furnace_rise_max_f, gas_rate_per_therm, furnace_input_low_fire_btuh, furnace_input_high_fire_btuh, furnace_input_nameplate_btuh, furnace_signature, heat_cfm",
+          "furnace_afue_rated_pct, furnace_condensing, furnace_rise_min_f, furnace_rise_max_f, gas_rate_per_therm, furnace_input_low_fire_btuh, furnace_input_high_fire_btuh, furnace_input_nameplate_btuh, furnace_signature, heat_cfm, blower_model, blower_type",
         )
         .eq("site_id", SITE_ID)
         .maybeSingle(),
@@ -67,7 +68,9 @@ export async function GET() {
     if (cyclesRes.error) throw new Error(cyclesRes.error.message)
 
     const cycles = (cyclesRes.data ?? []) as CycleRow[]
-    const p = (profRes.data ?? {}) as Record<string, unknown>
+    // Ratings left blank in Setup come from the manufacturer chart for the model.
+    const p = (await withOemChart(supabase, (profRes.data ?? {}) as Record<string, unknown>)) as Record<string, unknown>
+    const fromChart = (p.ratings_from_chart as string[] | undefined) ?? []
 
     const since = (d: Date) => cycles.filter((c) => Date.parse(c.started_at) >= d.getTime())
     const sum = (rows: CycleRow[], f: (c: CycleRow) => number | null) =>
@@ -133,6 +136,9 @@ export async function GET() {
         rise_min_f: n(p.furnace_rise_min_f as number | null),
         rise_max_f: n(p.furnace_rise_max_f as number | null),
         gas_rate_per_therm: n(p.gas_rate_per_therm as number | null),
+        input_btuh: n(p.furnace_input_nameplate_btuh as number | null),
+        // Which of these came from the manufacturer chart instead of Setup.
+        from_chart: fromChart,
       },
       setup: {
         gas_input: hasInput,
