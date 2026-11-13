@@ -11,6 +11,7 @@
 
 import { moistAirState } from "./psychrometrics"
 import { deriveAirflow, type AirflowConfidence, type AirflowResult } from "./airflow"
+import type { OemChart } from "./oem-table"
 import { capacityFromAirSide } from "./capacity"
 import { computeEfficiency } from "./seer2"
 import { extractHvacInputs, type LatestDevice } from "./extract"
@@ -73,6 +74,9 @@ export interface SystemProfileInputs {
   furnace_rise_min_f?: number | null
   furnace_rise_max_f?: number | null
   heat_cfm?: number | null
+  heat_blower_speed_tap?: string | null
+  // Manufacturer blower chart matched to blower_model (loaded server-side).
+  oem_chart?: OemChart | null
 }
 
 export interface ComputedReading {
@@ -146,6 +150,11 @@ export interface ComputedReading {
     staticFlag: string
     generalizedModel: boolean
     airflowNote: string
+    // Manufacturer-chart airflow only: the tap read and how it was settled.
+    airflowTap?: string | null
+    airflowTapSource?: "entered" | "matched_watts" | "factory_default" | null
+    airflowChartModel?: string | null
+    airflowLowerAccuracy?: boolean
     seer2FactorUsed: number
     seer2FactorSource: string
     ratedSeer2: number | null
@@ -318,6 +327,8 @@ export function runEngine(
     ecmProfile: profile?.ecm_profile,
     blowerSpeedTap: profile?.blower_speed_tap,
     blowerWatts: inputs.blowerWatts,
+    oemChart: profile?.oem_chart ?? null,
+    heatTap: profile?.heat_blower_speed_tap ?? null,
   }
   let airflow: AirflowResult
   if (isHeating && !furnace.blowerOn) {
@@ -328,9 +339,9 @@ export function runEngine(
       note: `Blower off (${furnace.stage}) — no airflow.`,
     }
   } else if (isHeating) {
-    airflow = deriveAirflow({ ...airflowBase, designCfmOverride: profile?.heat_cfm ?? null })
+    airflow = deriveAirflow({ ...airflowBase, airMode: "heat", designCfmOverride: profile?.heat_cfm ?? null })
   } else {
-    airflow = deriveAirflow(airflowBase)
+    airflow = deriveAirflow({ ...airflowBase, airMode: isCooling ? "cool" : "fan" })
   }
 
   // (d) Cooling math only in cooling mode.
@@ -463,6 +474,10 @@ export function runEngine(
       staticFlag: airflow.staticFlag,
       generalizedModel: airflow.generalizedModel,
       airflowNote: airflow.note,
+      airflowTap: airflow.tap ?? null,
+      airflowTapSource: airflow.tapSource ?? null,
+      airflowChartModel: airflow.chartModel ?? null,
+      airflowLowerAccuracy: airflow.lowerAccuracy ?? false,
       seer2FactorUsed: eff.seer2FactorUsed,
       seer2FactorSource: eff.seer2FactorSource,
       ratedSeer2: profile?.rated_seer2 ?? null,
