@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server"
 import { runAutomationTick } from "@/lib/automation/engine"
 import { ingestWeather } from "@/lib/weather-ingest"
+import { runFanSchedule } from "@/lib/nest/fan-schedule"
+import { createAdminClient } from "@/lib/supabase/admin"
 
 export const dynamic = "force-dynamic"
 export const maxDuration = 30
@@ -49,7 +51,14 @@ export async function POST(request: Request) {
       })),
     ])
     if (!weather.ok) console.log("[v0] weather ingest (tick) skipped:", weather.error)
-    return NextResponse.json({ ok: true, ...result, weather })
+    // Fan schedule runs after the automation so the two never send Nest
+    // commands at the same moment. It's the household's own setting, so it
+    // runs in every automation mode, including Manual.
+    const fan = await runFanSchedule(createAdminClient()).catch((err) => ({
+      action: null,
+      detail: err instanceof Error ? err.message : "fan schedule failed",
+    }))
+    return NextResponse.json({ ok: true, ...result, weather, fan })
   } catch (err) {
     console.log("[v0] automation tick failed:", err instanceof Error ? err.message : err)
     return NextResponse.json(
