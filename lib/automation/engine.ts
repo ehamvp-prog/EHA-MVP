@@ -579,11 +579,24 @@ export async function runAutomationTick(): Promise<TickResult> {
     const tolerance = (inSleep ? 3 : 5) + (mode === "savings" ? 3 : 0)
 
     const sel = selectTarget(huntBand, huntInputs, realityRh)
-    const targetTempF = sel.targetTempF
+    // Temperature target = the household's own heat or cool number, limited
+    // only by health limits that apply (e.g. young children: no warmer than
+    // 76°F, sleep-issues night window). The comfort chart's humidity-dependent
+    // edges no longer move it — people set what they want.
+    const healthMax = huntBand.active.reduce<number | null>(
+      (acc, c) => (c.max_temp_f != null ? Math.min(acc ?? Infinity, Number(c.max_temp_f)) : acc),
+      null,
+    )
+    const healthMin = huntBand.active.reduce<number | null>(
+      (acc, c) => (c.min_temp_f != null ? Math.max(acc ?? -Infinity, Number(c.min_temp_f)) : acc),
+      null,
+    )
+    const ownTargetF = heatingMode ? targets.heat : targets.cool
+    const targetTempF = Math.min(healthMax ?? Infinity, Math.max(healthMin ?? -Infinity, ownTargetF))
     const targetRh = sel.targetRh
     const tempError = realityTempF - targetTempF // >0 too warm
     const deadbandF = 1 + (mode === "savings" ? 1 : 0)
-    const offNumber = Math.abs(gap) > tolerance || Math.abs(tempError) > deadbandF
+    let offNumber = Math.abs(gap) > tolerance || Math.abs(tempError) > deadbandF
 
     // §6.2 dominant factor — which axis is further off ITS target, measured as
     // physical error on a common scale (°F vs %RH normalized by their comfort
@@ -747,6 +760,12 @@ export async function runAutomationTick(): Promise<TickResult> {
 
     if (nestConnected && coolingMode && thermostat?.coolSetpointF != null) {
       const setpoint = thermostat.coolSetpointF
+      // A setpoint left below target by an earlier humidity overcool (or any
+      // other leftover) gets put back on target once overcooling isn't allowed.
+      const overcoolWanted = humidityDominant && (hasDehumidifier || !!drying?.allowed)
+      if (!overcoolWanted && setpoint < clampSetpoint(targetTempF, comfortFloor, installerMax).value - RESEND_THRESHOLD_F) {
+        offNumber = true
+      }
 
       if (!inCooldown && offNumber) {
         // ---- Humidity is the dominant deficit (§6.2.1) --------------------
