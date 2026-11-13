@@ -8,9 +8,14 @@
 // fall on a near-straight line — the house's fingerprint. From the line:
 //   minutes per degree   how fast this house gains/loses heat
 //   no-run point         outdoor temp where the system stops needing to run
-//   nonstop point        outdoor temp where it would have to run 24 hours
+//   nonstop point        outdoor temp where it runs the whole hour, read
+//                        straight from hourly run time (not stretched off the line)
 //   expected vs actual   how yesterday / the last 7 days compare to the line
-// Data comes from weather_load_days (refreshed every 30 min by pg_cron).
+// Only days with a real load count toward the line: for cooling, warmer
+// outside than in; for heating, colder outside than in. Other days (e.g. the
+// AC run on a cool day to dry the air) are shown but not counted.
+// Data comes from weather_load_days (refreshed every 30 min by pg_cron) and
+// weather_load_hourly() for the hour-by-hour nonstop point.
 // =====================================================================
 
 import { NextResponse } from "next/server"
@@ -28,6 +33,32 @@ const RELIABLE_DAYS = 14
 // A line that explains less than this much of the day-to-day swing isn't a
 // fingerprint yet (mixed modes, thermostat changes, too few cold days).
 const MIN_R2 = 0.4
+// Hourly nonstop point: a 2°F bucket needs this many hours to count, the
+// system has to have run 55+ minutes in at least FULL_PCT% of them, and every
+// hotter (cooling) / colder (heating) bucket has to stay at HOLD_PCT% or more.
+const HOUR_MIN = 8
+const FULL_PCT = 90
+const HOLD_PCT = 75
+// Don't report a point more than this far past the outdoor temps actually seen.
+const STRETCH_F = 5
+
+type HourBin = { out_f: number; hours: number; avg_on_min: number | string; pct_full: number | string }
+
+function hourlyNonstop(bins: HourBin[], mode: "heating" | "cooling"): number | null {
+  const ok = bins
+    .filter((b) => b.hours >= HOUR_MIN)
+    .map((b) => ({ t: Number(b.out_f), full: Number(b.pct_full) }))
+    // Walk from mild toward extreme: cooling = hotter, heating = colder.
+    .sort((a, b) => (mode === "cooling" ? a.t - b.t : b.t - a.t))
+  for (let i = 0; i < ok.length; i++) {
+    if (ok[i].full < FULL_PCT) continue
+    if (ok.slice(i + 1).every((b) => b.full >= HOLD_PCT)) {
+      // Bucket is [t, t+2): report its middle.
+      return ok[i].t + 1
+    }
+  }
+  return null
+}
 
 type Row = {
   day_local: string
@@ -42,8 +73,6 @@ type Row = {
 
 const num = (v: unknown): number | null => (v == null || !Number.isFinite(Number(v)) ? null : Number(v))
 const r1 = (v: number | null) => (v == null || !Number.isFinite(v) ? null : Math.round(v * 10) / 10)
-// Outdoor temps outside this range mean the line is being stretched too far.
-const plausible = (v: number | null) => (v == null || v < -30 || v > 120 ? null : r1(v))
 
 function fitLine(pts: { x: number; y: number }[]) {
   const n = pts.length
@@ -92,10 +121,14 @@ export async function GET(request: Request) {
           ? Math.round(num(r.delivered_btu)! / num(r.run_minutes)!)
           : null,
       complete: r.day_local !== today && (r.indoor_hours ?? 0) >= MIN_HOURS && (r.outdoor_hours ?? 0) >= MIN_HOURS,
+      counted: false,
     }))
+    // A day counts when it's finished, well covered, the system ran, and there
+    // was a real load (ΔT is already signed: outside hotter for cooling,
+    // colder for heating).
+    for (const p of points) p.counted = p.complete && p.run > 0 && p.deltaT != null && p.deltaT > 0
 
-    // Fit only finished, well-covered days where the system actually ran.
-    const fitPts = points.filter((p) => p.complete && p.run > 0 && p.deltaT != null).map((p) => ({ x: p.deltaT!, y: p.run }))
+    const fitPts = points.filter((p) => p.counted).map((p) => ({ x: p.deltaT!, y: p.run }))
     const rawFit = fitLine(fitPts)
     const runDays = fitPts.length
     // Only trust a line that slopes the right way and actually fits the days.
@@ -114,8 +147,33 @@ export async function GET(request: Request) {
     const noRunDelta = usableFit ? -fit!.intercept / fit!.slope : null
     const nonstopDelta = usableFit ? (1440 - fit!.intercept) / fit!.slope : null
 
-    // Yesterday and the last 7 finished days: actual vs what the line expects.
-    const finished = points.filter((p) => p.complete && p.deltaT != null)
+    // Outdoor temps actually seen on counted days: answers are only given
+    // inside that range (plus a few degrees), never stretched off the line.
+    const countedOut = points.filter((p) => p.counted && p.outdoor != null).map((p) => p.outdoor!)
+    const outMin = countedOut.length ? Math.min(...countedOut) : null
+    const outMax = countedOut.length ? Math.max(...countedOut) : null
+    const inRange = (v: number | null) =>
+      v != null && outMin != null && outMax != null && v >= outMin - STRETCH_F && v <= outMax + STRETCH_F ? r1(v) : null
+    const noRunOutdoor = noRunDelta != null ? inRange(toOutdoor(noRunDelta)) : null
+    const lineNonstop = nonstopDelta != null ? inRange(toOutdoor(nonstopDelta)) : null
+
+    // Nonstop point, hour by hour: the outdoor temp at which the system runs
+    // the whole hour. This is what the household actually feels.
+    const { data: bins } = await supabase.rpc("weather_load_hourly", { p_mode: mode, p_site: SITE_ID, p_days: 150 })
+    const hourNonstop = hourlyNonstop((bins ?? []) as HourBin[], mode)
+
+    // The line drawn on the chart, in outdoor temps.
+    // Cool: run = s·(out − in) + b. Heat: run = s·(in − out) + b.
+    const lineOutdoor =
+      usableFit && indoorAvg != null
+        ? mode === "cooling"
+          ? { slope: fit!.slope, intercept: fit!.intercept - fit!.slope * indoorAvg }
+          : { slope: -fit!.slope, intercept: fit!.intercept + fit!.slope * indoorAvg }
+        : null
+
+    // Latest and the last 7 counted days: actual vs what the line expects.
+    // Only days with a real load — the line says nothing about the others.
+    const finished = points.filter((p) => p.counted)
     const yesterday = finished.length ? finished[finished.length - 1] : null
     const last7 = finished.slice(-7)
     const sum = (a: number[]) => a.reduce((x, y) => x + y, 0)
@@ -141,9 +199,15 @@ export async function GET(request: Request) {
       fit: fit
         ? { slope: r1(fit.slope), intercept: r1(fit.intercept), r2: Math.round(fit.r2 * 100) / 100, n: fit.n }
         : null,
+      line_outdoor: lineOutdoor
+        ? { slope: Math.round(lineOutdoor.slope * 100) / 100, intercept: Math.round(lineOutdoor.intercept) }
+        : null,
       indoor_avg_f: r1(indoorAvg),
-      no_run_outdoor_f: noRunDelta != null ? plausible(toOutdoor(noRunDelta)) : null,
-      nonstop_outdoor_f: nonstopDelta != null ? plausible(toOutdoor(nonstopDelta)) : null,
+      counted_outdoor_range: outMin != null ? [r1(outMin), r1(outMax)] : null,
+      no_run_outdoor_f: noRunOutdoor,
+      nonstop_outdoor_f: hourNonstop ?? lineNonstop,
+      nonstop_source: hourNonstop != null ? "hourly" : lineNonstop != null ? "line" : null,
+      not_counted_days: points.filter((p) => p.complete && p.run > 0 && !p.counted).length,
       // Why it's still learning, in plain words.
       learning_reason: fit
         ? null
