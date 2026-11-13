@@ -44,6 +44,16 @@ function hm(min: number | null | undefined) {
   return h ? `${h} hr ${m} min` : `${m} min`
 }
 
+// "Yesterday", or the date of the last day that counted (e.g. the AC card in
+// November, when the last real cooling day was weeks ago).
+function dayLabel(day: string, mode: "heating" | "cooling") {
+  const y = new Date(Date.now() - 86400000).toLocaleDateString("en-CA", { timeZone: "America/Chicago" })
+  if (day === y) return "Yesterday"
+  const d = new Date(`${day}T12:00:00`)
+  const md = d.toLocaleDateString("en-US", { month: "short", day: "numeric" })
+  return `${md} — last ${mode === "heating" ? "cold" : "hot"} day counted`
+}
+
 // Plain-language read of actual vs expected.
 function verdict(pct: number | null): { text: string; tone: string } {
   if (pct == null) return { text: "", tone: "text-muted" }
@@ -103,7 +113,7 @@ export function WeatherLoadCard({ mode }: { mode: "heating" | "cooling" }) {
         <>
           {y ? (
             <div className="rounded-xl border border-border bg-elevated p-3 text-center">
-              <p className="text-[10px] uppercase tracking-wide text-muted">Yesterday</p>
+              <p className="text-[10px] uppercase tracking-wide text-muted">{dayLabel(y.day, mode)}</p>
               <p className="mt-1 text-sm text-foreground text-pretty">
                 Ran <span className="font-semibold tabular-nums">{hm(y.actual)}</span>
                 {y.expected != null ? (
