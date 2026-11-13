@@ -60,5 +60,15 @@ check("cooling coast not heat", !["burn", "ignition", "prepurge"].includes(coast
 const fan = decodeFurnaceStep("idle", { furnaceWatts: 78, condenserWatts: 0, riseF: 0 }, SIG)
 check("78 W = fan only", fan.stage === "fan_only", fan.stage)
 
+// The AC blower winding down passes through the igniter's watts for one
+// sample. That is not a trial for ignition.
+const wind = decodeFurnaceStep("cooling_blower", { furnaceWatts: 220, condenserWatts: 0, riseF: -10 }, SIG)
+check("blower wind-down at 220 W is not ignition", wind.stage !== "ignition", wind.stage)
+const wind2 = decodeFurnaceStep("post_purge", { furnaceWatts: 205, condenserWatts: 0, riseF: 20 }, SIG)
+check("heat blower wind-down at 205 W is not a second ignition", wind2.stage !== "ignition", wind2.stage)
+// A real retry: inducer purges again, then the igniter.
+const retry = decodeFurnaceStep("prepurge", { furnaceWatts: 205, condenserWatts: 0, riseF: 0 }, SIG)
+check("igniter after inducer = ignition", retry.stage === "ignition", retry.stage)
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

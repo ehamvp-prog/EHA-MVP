@@ -5,7 +5,7 @@ import useSWR from "swr"
 import Link from "next/link"
 import { Lock, Unlock } from "lucide-react"
 import { FilterCalibrationWorkflow } from "./filter-health-card"
-import { MeterClock, FurnaceSignaturePanel } from "./furnace-setup"
+import { MeterClock, FurnaceSignaturePanel, GasPricePanel } from "./furnace-setup"
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
 
@@ -169,7 +169,7 @@ const FIELD_KEYS = [
   // The Furnace (heating)
   "gas_type",
   "gas_heating_value_btu_per_cuft",
-  "gas_rate_per_therm",
+  "gas_rate_override_per_mcf",
   "furnace_stages",
   "furnace_input_nameplate_btuh",
   "furnace_input_low_fire_btuh",
@@ -485,14 +485,15 @@ export function InstallerSetup() {
             onChange={set}
             disabled={locked}
           />
+          <GasPricePanel />
           <Field
-            label="Gas price"
-            hint="What the gas bill charges per therm, all-in. Used for the gas cost on the Home screen."
-            name="gas_rate_per_therm"
+            label="Gas price override (optional)"
+            hint="Leave blank to use the Kansas Gas Service price automatically. Only fill this in for propane or a different gas company. All-in price per Mcf, the way the bill shows it."
+            name="gas_rate_override_per_mcf"
             type="number"
-            unit="$/therm"
-            placeholder="e.g. 1.25"
-            value={v("gas_rate_per_therm")}
+            unit="$/Mcf"
+            placeholder="blank = automatic"
+            value={v("gas_rate_override_per_mcf")}
             onChange={set}
             disabled={locked}
           />

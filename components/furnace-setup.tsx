@@ -165,3 +165,47 @@ export function FurnaceSignaturePanel({ disabled }: { disabled?: boolean }) {
     </div>
   )
 }
+
+// ---- Gas price (automatic) ---------------------------------------------------
+
+type GasPrice = {
+  ok: boolean
+  source: "kansas_gas_service" | "manual" | "none"
+  per_mcf: number | null
+  per_therm: number | null
+  cost_of_gas_per_mcf: number | null
+  delivery_per_mcf: number | null
+  period: string | null
+  checked_at: string | null
+}
+
+export function GasPricePanel() {
+  const { data } = useSWR<GasPrice>("/api/gas/price", fetcher)
+  const money = (n: number | null | undefined, d = 2) => (n == null ? "—" : `$${n.toFixed(d)}`)
+  return (
+    <div className="rounded-xl border border-border bg-elevated p-3 sm:col-span-2">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-sm font-medium text-foreground">Gas price</p>
+        <span className="shrink-0 rounded-md border border-ok/40 px-2 py-0.5 text-[10px] uppercase tracking-wide text-ok">
+          {data?.source === "manual" ? "Manual" : "Automatic"}
+        </span>
+      </div>
+      <p className="mt-1 text-2xl font-semibold tabular-nums text-foreground">
+        {money(data?.per_mcf)}
+        <span className="text-sm font-normal text-muted"> per Mcf</span>
+      </p>
+      {data?.source === "kansas_gas_service" ? (
+        <p className="mt-1 text-xs leading-relaxed text-muted">
+          Kansas Gas Service cost of gas {money(data.cost_of_gas_per_mcf, 4)}
+          {data.period ? ` (${data.period})` : ""} + delivery charge {money(data.delivery_per_mcf, 4)}. Checked daily.
+          About {money(data.per_therm, 3)} per therm. The monthly service charge and city fees aren&apos;t included —
+          they don&apos;t change with how much the furnace runs.
+        </p>
+      ) : data?.source === "manual" ? (
+        <p className="mt-1 text-xs text-muted">Using the override below.</p>
+      ) : (
+        <p className="mt-1 text-xs text-muted">Waiting for the first Kansas Gas Service price check.</p>
+      )}
+    </div>
+  )
+}

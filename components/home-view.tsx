@@ -9,6 +9,7 @@ import { SavingsSection } from "./savings-section"
 import { ComfortChart } from "./comfort-chart"
 import { EfficiencyChart } from "./efficiency-chart"
 import { FilterHealthCard } from "./filter-health-card"
+import { WeatherLoadCard } from "./weather-load-card"
 import { ModeToggle, useTileMode, type TileMode } from "./mode-toggle"
 import {
   TemperatureRiseCard,
@@ -130,7 +131,10 @@ export function HomeView() {
   const detected: TileMode | null = c?.season_mode ?? null
   const [tileMode, setTileMode] = useTileMode(detected)
   const heatTiles = tileMode === "heating"
-  const { data: heat } = useHeatingSummary()
+  // Only use the heating summary when it actually loaded — an error reply
+  // ({ ok: false }) must never take the whole Home screen down.
+  const { data: heatRes } = useHeatingSummary()
+  const heat = heatRes?.ok ? heatRes : undefined
 
   const status = systemStatus(c)
   const humidity = humidityComfort(c?.return_rh ?? null, heatTiles)
@@ -195,9 +199,11 @@ export function HomeView() {
         </p>
         {heatTiles ? (
           <p className="mt-1 text-center text-xs text-muted-foreground">
-            {heat?.rated.gas_rate_per_therm != null
-              ? `Gas added at your $${heat.rated.gas_rate_per_therm.toFixed(2)}/therm from the gas bill.`
-              : "Gas cost shows once the gas rate and meter clock are entered in Setup. Electric only for now."}
+            {heat?.rated.gas_rate_per_therm == null
+              ? "Gas cost shows once the gas price is available. Electric only for now."
+              : !heat.setup.gas_input
+                ? "Gas cost starts once the gas meter is clocked in Setup. Electric only for now."
+                : `Gas added at $${(heat.rated.gas_rate_per_therm * 10.3).toFixed(2)}/Mcf (Kansas Gas Service, checked daily).`}
           </p>
         ) : null}
 
@@ -227,6 +233,9 @@ export function HomeView() {
           {/* 6. Heating only — temperature rise and furnace cycles */}
           {heatTiles ? <TemperatureRiseCard live={c} summary={heat} /> : null}
           {heatTiles ? <FurnaceCyclesCard live={c} summary={heat} /> : null}
+
+          {/* Run time vs. weather — how hard the system worked for how cold/hot it was */}
+          <WeatherLoadCard mode={heatTiles ? "heating" : "cooling"} />
 
           {/* 7. Filter health — needle gauge driven by filter LOAD ratio */}
           <FilterHealthCard staticInWc={c?.static_pressure_inwc ?? null} />

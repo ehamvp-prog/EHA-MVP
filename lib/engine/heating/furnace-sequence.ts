@@ -211,7 +211,13 @@ function decodeByBands(
     return { stage: "burn", fire, burnerOn: true, blowerOn: true, confidence: conf, note: heatInDuct ? `Burning (${fire} fire).` : "Burning, heat not yet at the supply sensor." }
   }
   if (sig.ignition_w != null && within(w, sig.ignition_w, tol)) {
-    return { stage: "ignition", fire: "unknown", burnerOn: false, blowerOn: false, confidence: conf, note: "Igniter energized — trial for ignition." }
+    // The igniter only comes on after the inducer has proved draft. A lone
+    // sample in this band right after a blower run is the blower winding down
+    // through these watts, not a trial for ignition.
+    if (prev === "prepurge" || prev === "ignition") {
+      return { stage: "ignition", fire: "unknown", burnerOn: false, blowerOn: false, confidence: conf, note: "Igniter energized — trial for ignition." }
+    }
+    return { stage: "unknown", fire: "unknown", burnerOn: false, blowerOn: true, confidence: conf, note: `Blower winding down (${Math.round(w)} W).` }
   }
   if (within(w, sig.inducer_only_w, tol)) {
     if (prev === "ignition" || prev === "burn") {
