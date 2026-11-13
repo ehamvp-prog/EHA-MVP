@@ -5,6 +5,7 @@
 // number that gets SAVED.
 // =====================================================================
 
+import { withOemChart } from "@/lib/airflow/oem-chart"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { runEngine, type SystemProfileInputs, type ComputedReading } from "@/lib/engine"
 import { extractHvacInputs, type LatestDevice, type HvacInputs } from "@/lib/engine/extract"
@@ -55,11 +56,13 @@ export async function computeLiveReading(): Promise<ComputeBundle> {
   const supabase = createAdminClient()
   const readingAt = new Date().toISOString()
 
-  const { data: profile } = await supabase
+  const { data: profileRow } = await supabase
     .from("system_profile")
     .select("*")
     .eq("site_id", SITE_ID)
     .maybeSingle()
+  // Attach the manufacturer blower chart for the entered model, if the library has it.
+  const profile = await withOemChart(supabase, profileRow as Record<string, unknown> | null)
 
   const { data: rows, error } = await supabase
     .from("telemetry")

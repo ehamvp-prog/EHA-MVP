@@ -17,6 +17,7 @@
 //   heating_decode_state  bookmark + the cycle still in progress
 // =====================================================================
 
+import { withOemChart } from "@/lib/airflow/oem-chart"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { runEngine, type SystemProfileInputs } from "@/lib/engine"
 import { extractHvacInputs, type LatestDevice } from "@/lib/engine/extract"
@@ -139,10 +140,12 @@ export async function runHeatingDecode(opts: { deadlineMs?: number; maxPages?: n
   const stopAt = Date.now() + (opts.deadlineMs ?? 20000)
   const maxPages = opts.maxPages ?? 25
 
-  const [{ data: profile }, { data: state }] = await Promise.all([
+  const [{ data: profileRow }, { data: state }] = await Promise.all([
     supabase.from("system_profile").select("*").eq("site_id", SITE_ID).maybeSingle(),
     supabase.from("heating_decode_state").select("*").eq("site_id", SITE_ID).maybeSingle(),
   ])
+  // Attach the manufacturer blower chart so heat cycles use chart airflow.
+  const profile = await withOemChart(supabase, profileRow as Record<string, unknown> | null)
 
   const signature = parseSignature((profile as { furnace_signature?: unknown } | null)?.furnace_signature)
   const commissioned = signature?.commissioned === true
