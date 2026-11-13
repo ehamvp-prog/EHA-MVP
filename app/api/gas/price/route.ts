@@ -35,7 +35,14 @@ function shape(p: Record<string, unknown> | null) {
   }
 }
 
-export async function GET() {
+export async function GET(request: Request) {
+  // Temporary: hand back the public KGS sheet bytes so the parser can be built
+  // against the real file. Removed once parsing is verified.
+  if (new URL(request.url).searchParams.get("raw") === "1") {
+    const r = await fetch(KGS_COST_OF_GAS_URL, { cache: "no-store" })
+    const buf = Buffer.from(await r.arrayBuffer())
+    return NextResponse.json({ ok: r.ok, status: r.status, bytes: buf.length, b64: buf.toString("base64") })
+  }
   const supabase = createAdminClient()
   const { data, error } = await supabase.from("system_profile").select(COLS).eq("site_id", SITE_ID).maybeSingle()
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 })
