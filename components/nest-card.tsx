@@ -24,6 +24,15 @@ type NestData = {
   thermostat: Thermostat | null
 }
 
+type FanSchedule = "auto" | "on" | "30" | "15"
+const FAN_SCHEDULES: { key: FanSchedule; label: string; sub: string }[] = [
+  { key: "auto", label: "Auto", sub: "Only while heating or cooling" },
+  { key: "on", label: "Always on", sub: "Runs 24/7" },
+  { key: "30", label: "30 min / hour", sub: "Top of every hour" },
+  { key: "15", label: "15 min / hour", sub: "Top of every hour" },
+]
+const FAN_RUN_FOR = [15, 30, 60, 120] as const
+
 // Nest data is rate-limited and only changes occasionally — poll every 5 min.
 const POLL_MS = 5 * 60 * 1000
 
@@ -63,6 +72,11 @@ export function NestCard() {
   })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const { data: fanData, mutate: mutateFan } = useSWR<{ ok: boolean; schedule: FanSchedule }>(
+    "/api/nest/fan-schedule",
+    fetcher,
+  )
+  const fanSchedule: FanSchedule = fanData?.schedule ?? "auto"
 
   // Collapsed by default: the card shows only the two readings until expanded.
   const [expanded, setExpanded] = useState(false)
@@ -184,6 +198,30 @@ export function NestCard() {
     }
   }
 
+  async function setFanSchedule(schedule: FanSchedule) {
+    if (!unlocked) return
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch("/api/nest/fan-schedule", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ schedule }),
+      })
+      const json = await res.json()
+      if (!res.ok || !json.ok) {
+        setError(json.error === "rate_limited" ? "Nest is busy — try again in a moment." : "Couldn't change the fan. Please try again.")
+        return
+      }
+      await mutateFan()
+      await mutate()
+    } catch {
+      setError("Couldn't reach your thermostat. Please try again.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
   function clampSetpoint(v: number) {
     return Math.max(45, Math.min(95, Math.round(v)))
   }
@@ -276,7 +314,7 @@ export function NestCard() {
           </span>
         ) : t.mode === "HEATCOOL" ? (
           <span className="text-sm font-semibold text-foreground">
-            {t.heatSetpointF ?? "—"}° – {t.coolSetpointF ?? "—"}°F
+            Heat to {t.heatSetpointF ?? "—"}° · Cool to {t.coolSetpointF ?? "—"}°
           </span>
         ) : null}
       </div>
@@ -403,32 +441,59 @@ export function NestCard() {
             )
           })}
         </div>
+        <p className="mt-2 text-[11px] text-muted text-pretty">
+          Auto switches between heating and cooling by itself, using your Heat to and Cool to numbers in Comfort
+          settings (always at least 2°F apart).
+        </p>
       </div>
 
-      {/* Fan toggle */}
+      {/* Fan */}
       <div>
         <p className="mb-2 text-xs uppercase tracking-wide text-muted">Fan</p>
         <div className="grid grid-cols-2 gap-2">
-          {(["AUTO", "ON"] as const).map((fm) => {
-            const active = (t.fanMode === "ON" ? "ON" : "AUTO") === fm
+          {FAN_SCHEDULES.map((f) => {
+            const active = fanSchedule === f.key
             return (
               <button
-                key={fm}
+                key={f.key}
                 type="button"
-                onClick={() => control({ fanMode: fm })}
+                onClick={() => setFanSchedule(f.key)}
                 disabled={busy || active || locked}
-                className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-sm font-medium transition-colors ${
+                className={`flex flex-col items-center gap-0.5 rounded-xl border px-3 py-2.5 text-sm font-medium transition-colors ${
                   active
                     ? "border-accent bg-accent text-accent-foreground"
                     : "border-border bg-elevated text-muted hover:text-foreground disabled:opacity-50"
                 }`}
               >
-                <Fan className="h-4 w-4" />
-                {fm === "AUTO" ? "Auto" : "On"}
+                <span className="flex items-center gap-1.5">
+                  <Fan className="h-4 w-4" />
+                  {f.label}
+                </span>
+                <span className={`text-[10px] ${active ? "text-accent-foreground/80" : "text-muted"}`}>{f.sub}</span>
               </button>
             )
           })}
         </div>
+        <p className="mb-2 mt-3 text-xs text-muted">
+          Run once now{t.fanMode === "ON" ? " · fan is running" : ""}
+        </p>
+        <div className="grid grid-cols-4 gap-2">
+          {FAN_RUN_FOR.map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => control({ fanMode: "ON", fanMinutes: m })}
+              disabled={busy || locked}
+              className="rounded-xl border border-border bg-elevated px-2 py-2 text-xs font-medium text-muted transition-colors hover:text-foreground disabled:opacity-50"
+            >
+              {m < 60 ? `${m} min` : `${m / 60} hr`}
+            </button>
+          ))}
+        </div>
+        <p className="mt-2 text-[11px] text-muted text-pretty">
+          The blower always runs while heating or cooling — that&apos;s built into the equipment, so there&apos;s no
+          fan &quot;off.&quot;
+        </p>
       </div>
 
       {error ? <p className="mt-3 text-sm text-bad">{error}</p> : null}

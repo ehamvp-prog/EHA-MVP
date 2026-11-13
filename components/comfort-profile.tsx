@@ -24,6 +24,10 @@ import {
   PiggyBank,
   Scale,
   Moon,
+  Flame,
+  Snowflake,
+  Minus,
+  Plus,
 } from "lucide-react"
 import {
   scoreAgainstBand,
@@ -56,7 +60,14 @@ type ProfileRow = {
   sleep_start: string
   sleep_end: string
   sleep_target_f: number
+  heat_target_f: number
+  cool_target_f: number
+  sleep_heat_target_f: number
+  sleep_cool_target_f: number
 }
+
+// Auto (heat/cool changeover) keeps cool at least this far above heat.
+const BAND_F = 2
 
 // The derived model the server ships alongside the profile. Everything the ring
 // and breakdown need to score LIVE reality client-side without re-deriving.
@@ -94,6 +105,10 @@ const DEFAULT_PROFILE: ProfileRow = {
   sleep_start: "22:00",
   sleep_end: "06:00",
   sleep_target_f: 72,
+  heat_target_f: 70,
+  cool_target_f: 74,
+  sleep_heat_target_f: 68,
+  sleep_cool_target_f: 72,
 }
 
 const OCCUPANT_OPTIONS: { value: Occupant; label: string; sub: string }[] = [
@@ -265,12 +280,33 @@ export function ComfortProfilePanel() {
         sleep_start: String(p.sleep_start ?? "22:00").slice(0, 5),
         sleep_end: String(p.sleep_end ?? "06:00").slice(0, 5),
         sleep_target_f: p.sleep_target_f ?? p.preferred_temp_f ?? 72,
+        heat_target_f: p.heat_target_f ?? p.preferred_temp_f ?? 70,
+        cool_target_f: p.cool_target_f ?? (p.preferred_temp_f ?? 72) + BAND_F,
+        sleep_heat_target_f: p.sleep_heat_target_f ?? p.sleep_target_f ?? p.preferred_temp_f ?? 68,
+        sleep_cool_target_f: p.sleep_cool_target_f ?? (p.sleep_target_f ?? p.preferred_temp_f ?? 70) + BAND_F,
       })
     }
   }, [data, dirty])
 
   const set = <K extends keyof ProfileRow>(key: K, value: ProfileRow[K]) => {
     setForm((f) => ({ ...f, [key]: value }))
+    setDirty(true)
+  }
+
+  // Change one side of a heat/cool pair; the other side moves if needed to
+  // keep the 2°F gap.
+  const setPair = (heatKey: "heat_target_f" | "sleep_heat_target_f", coolKey: "cool_target_f" | "sleep_cool_target_f", side: "heat" | "cool", v: number) => {
+    setForm((f) => {
+      const next = { ...f }
+      if (side === "heat") {
+        next[heatKey] = v
+        if (next[coolKey] < v + BAND_F) next[coolKey] = v + BAND_F
+      } else {
+        next[coolKey] = v
+        if (next[heatKey] > v - BAND_F) next[heatKey] = v - BAND_F
+      }
+      return next
+    })
     setDirty(true)
   }
 
@@ -363,6 +399,25 @@ export function ComfortProfilePanel() {
           </div>
           <span className="text-3xl font-bold tabular-nums text-accent">{targetScore}</span>
         </div>
+      </Card>
+
+      {/* Heat & Cool targets */}
+      <Card>
+        <CardHeader
+          icon={<Thermometer className="h-5 w-5 text-primary" />}
+          title="Heat & Cool"
+          sub="What the system heats to and cools to. On Auto, the thermostat switches between them by itself."
+        />
+        <TargetPair
+          heat={form.heat_target_f}
+          cool={form.cool_target_f}
+          onHeat={(v) => setPair("heat_target_f", "cool_target_f", "heat", v)}
+          onCool={(v) => setPair("heat_target_f", "cool_target_f", "cool", v)}
+        />
+        <p className="mt-2 text-xs text-muted text-pretty">
+          Heat and cool always stay at least {BAND_F}°F apart so the furnace and AC never fight each other.
+          {form.sleep_enabled ? " Overnight numbers are under Sleep Schedule." : ""}
+        </p>
       </Card>
 
       {/* Household Demographics */}
@@ -510,20 +565,17 @@ export function ComfortProfilePanel() {
                 />
               </div>
             </div>
-            <SliderRow
-              icon={<Thermometer className="h-4 w-4 text-muted" />}
-              label="Sleep Temperature"
-              value={`${Math.round(form.sleep_target_f)}°F`}
-              min={60}
-              max={78}
-              step={1}
-              val={form.sleep_target_f}
-              onChange={(v) => set("sleep_target_f", v)}
-              ticks={["60°F (Cool)", "68°F", "78°F (Warm)"]}
-            />
-            <p className="mt-1 text-xs text-muted text-pretty">
-              Defaults to your daytime preference. Set it lower for a cooler night — we&apos;ll drive to it during
-              your sleep window and never quietly walk it back up.
+            <div className="mt-4">
+              <TargetPair
+                heat={form.sleep_heat_target_f}
+                cool={form.sleep_cool_target_f}
+                onHeat={(v) => setPair("sleep_heat_target_f", "sleep_cool_target_f", "heat", v)}
+                onCool={(v) => setPair("sleep_heat_target_f", "sleep_cool_target_f", "cool", v)}
+              />
+            </div>
+            <p className="mt-2 text-xs text-muted text-pretty">
+              What the system heats and cools to during your sleep window. We drive to these overnight and never
+              quietly walk them back up.
             </p>
           </>
         ) : null}
@@ -1418,6 +1470,87 @@ function TargetLine({
         <span className="ml-1 text-sm font-normal text-muted-foreground">/ {Math.round(target.targetRh)}%</span>
       </p>
       {limit ? <p className="mt-2 text-[12px] leading-snug text-muted-foreground text-pretty">{limit}</p> : null}
+    </div>
+  )
+}
+
+// Heat-to / Cool-to steppers.
+function TargetPair({
+  heat,
+  cool,
+  onHeat,
+  onCool,
+}: {
+  heat: number
+  cool: number
+  onHeat: (v: number) => void
+  onCool: (v: number) => void
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-3">
+      <Stepper
+        label="Heat to"
+        icon={<Flame className="h-4 w-4 text-orange" />}
+        value={heat}
+        min={55}
+        max={80}
+        onChange={onHeat}
+      />
+      <Stepper
+        label="Cool to"
+        icon={<Snowflake className="h-4 w-4 text-accent" />}
+        value={cool}
+        min={60}
+        max={85}
+        onChange={onCool}
+      />
+    </div>
+  )
+}
+
+function Stepper({
+  label,
+  icon,
+  value,
+  min,
+  max,
+  onChange,
+}: {
+  label: string
+  icon: React.ReactNode
+  value: number
+  min: number
+  max: number
+  onChange: (v: number) => void
+}) {
+  const v = Math.round(value)
+  return (
+    <div className="rounded-xl border border-border bg-elevated p-3">
+      <p className="flex items-center justify-center gap-1.5 text-xs font-medium text-muted">
+        {icon}
+        {label}
+      </p>
+      <div className="mt-2 flex items-center justify-between">
+        <button
+          type="button"
+          aria-label={`Lower ${label}`}
+          onClick={() => onChange(Math.max(min, v - 1))}
+          disabled={v <= min}
+          className="flex h-9 w-9 items-center justify-center rounded-full border border-border bg-card text-foreground disabled:opacity-40"
+        >
+          <Minus className="h-4 w-4" />
+        </button>
+        <span className="text-2xl font-semibold tabular-nums text-foreground">{v}°</span>
+        <button
+          type="button"
+          aria-label={`Raise ${label}`}
+          onClick={() => onChange(Math.min(max, v + 1))}
+          disabled={v >= max}
+          className="flex h-9 w-9 items-center justify-center rounded-full border border-border bg-card text-foreground disabled:opacity-40"
+        >
+          <Plus className="h-4 w-4" />
+        </button>
+      </div>
     </div>
   )
 }
