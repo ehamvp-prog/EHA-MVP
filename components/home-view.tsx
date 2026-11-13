@@ -195,9 +195,11 @@ export function HomeView() {
         </p>
         {heatTiles ? (
           <p className="mt-1 text-center text-xs text-muted-foreground">
-            {heat?.rated.gas_rate_per_therm != null
-              ? `Gas added at your $${heat.rated.gas_rate_per_therm.toFixed(2)}/therm from the gas bill.`
-              : "Gas cost shows once the gas rate and meter clock are entered in Setup. Electric only for now."}
+            {heat?.rated.gas_rate_per_therm == null
+              ? "Gas cost shows once the gas price is available. Electric only for now."
+              : !heat.setup.gas_input
+                ? "Gas cost starts once the gas meter is clocked in Setup. Electric only for now."
+                : `Gas added at $${(heat.rated.gas_rate_per_therm * 10.3).toFixed(2)}/Mcf (Kansas Gas Service, checked daily).`}
           </p>
         ) : null}
 
