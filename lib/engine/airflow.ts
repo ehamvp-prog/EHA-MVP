@@ -41,6 +41,8 @@
 // The nominal rated CFM is also kept as an outer-bounds reference.
 // =====================================================================
 
+import { oemAirflow, tapSourceLabel, type AirMode, type OemChart, type TapSource } from "./oem-table"
+
 export type AirflowConfidence =
   | "static_oem" // static read against a real OEM blower table
   | "ecm_commanded" // constant-airflow ECM holding its commanded CFM
@@ -56,6 +58,11 @@ export interface AirflowResult {
   staticFlag: "normal" | "high" | "unknown" // sanity vs blower
   generalizedModel: boolean // true when using the generalized curve (not OEM)
   note: string
+  // OEM chart path only: which tap was read, and how it was settled.
+  tap?: string | null
+  tapSource?: TapSource | null
+  chartModel?: string | null
+  lowerAccuracy?: boolean
 }
 
 // Design static pressure (total external static) the curve anchors to.
@@ -129,6 +136,10 @@ interface AirflowInputs {
   // runs the blower on its heat tap). null = no anchor -> fallback; never
   // silently reuse the cooling anchor.
   designCfmOverride?: number | null
+  // Manufacturer blower chart for the entered model, when the library has one.
+  oemChart?: OemChart | null
+  airMode?: AirMode
+  heatTap?: string | null
 }
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -148,17 +159,6 @@ function ratedCfmOf(
 /** Is this an ECM / variable-speed blower? ECM targets a commanded CFM. */
 function isEcm(ecmProfile?: string | null): boolean {
   return typeof ecmProfile === "string" && ecmProfile.trim().length > 0
-}
-
-/**
- * OEM blower-table lookup hook. Returns a CFM when a real table exists
- * for the model/tap/static, otherwise null. No tables are bundled yet,
- * so this currently always returns null — but the path is wired so that
- * dropping in real tables upgrades confidence to "static_oem" with no
- * other code changes.
- */
-function lookupOemTableCfm(_input: AirflowInputs): number | null {
-  return null
 }
 
 /**
@@ -184,6 +184,53 @@ export function deriveAirflow(input: AirflowInputs): AirflowResult {
     input.staticInWc != null && Number.isFinite(input.staticInWc)
       ? input.staticInWc
       : null
+
+  // Best path: the manufacturer's blower chart for the entered model, read at
+  // the measured static for the tap the blower is on.
+  // A heat CFM typed into Setup (e.g. measured with a flow grid) beats the chart.
+  const heatCfmEntered = (input.airMode ?? "cool") === "heat" && rated != null
+  if (input.oemChart && !heatCfmEntered) {
+    const mode: AirMode = input.airMode ?? "cool"
+    const r = oemAirflow({
+      chart: input.oemChart,
+      mode,
+      enteredTap: mode === "heat" ? input.heatTap : input.blowerSpeedTap,
+      staticInWc,
+      blowerWatts: input.blowerWatts ?? null,
+    })
+    // Cooling/fan already has a design-airflow anchor. Don't swap it for a
+    // chart read on a guessed tap, or when the entered tap isn't on the chart
+    // (likely a different motor revision) — heat has no other source, so a
+    // guessed heat tap is used and labeled lower accuracy.
+    const hasCoolAnchor = rated != null && mode !== "heat"
+    const skip = r != null && hasCoolAnchor && (r.tapSource === "factory_default" || r.enteredTapUnmatched)
+    if (r && !skip) {
+      const chart = input.oemChart
+      const lowerAccuracy =
+        r.tapSource === "factory_default" || r.outsideChart || !chart.checked || r.enteredTapUnmatched
+      const bits = [
+        `${chart.brand} ${chart.family ?? chart.modelPattern} blower chart`,
+        `${r.tap} (${tapSourceLabel(r.tapSource)})`,
+        r.constantCfm ? "set airflow" : `at ${staticInWc!.toFixed(2)}" WC`,
+      ]
+      if (r.outsideChart) bits.push(`static is past the chart, edge value used`)
+      if (!chart.checked) bits.push("chart not yet double-checked")
+      if (r.enteredTapUnmatched) bits.push(`entered tap isn't printed on this chart (different motor revision?)`)
+      return {
+        cfm: r.cfm,
+        confidence: "static_oem",
+        ratedCfm: rated,
+        staticInWc,
+        staticFlag: staticInWc == null ? "unknown" : staticInWc > HIGH_STATIC_INWC ? "high" : "normal",
+        generalizedModel: false,
+        note: `~${r.cfm} CFM from the ${bits.join(", ")}.${lowerAccuracy ? " Lower accuracy." : ""}`,
+        tap: r.tap,
+        tapSource: r.tapSource,
+        chartModel: chart.modelPattern,
+        lowerAccuracy,
+      }
+    }
+  }
 
   // No static reading -> cannot derive airflow on this stack. Fallback.
   if (staticInWc == null) {
@@ -215,20 +262,6 @@ export function deriveAirflow(input: AirflowInputs): AirflowResult {
 
   const staticFlag: AirflowResult["staticFlag"] =
     staticInWc > HIGH_STATIC_INWC ? "high" : "normal"
-
-  // Best path: a real OEM blower table for the entered model.
-  const oemCfm = lookupOemTableCfm(input)
-  if (oemCfm != null) {
-    return {
-      cfm: oemCfm,
-      confidence: "static_oem",
-      ratedCfm: rated,
-      staticInWc,
-      staticFlag,
-      generalizedModel: false,
-      note: "Airflow from OEM blower table at measured static.",
-    }
-  }
 
   // Constant-TORQUE ECM (X13 / multi-tap): airflow FALLS with static. Must be
   // checked BEFORE the constant-airflow branch below, because isEcm() is true
