@@ -327,7 +327,14 @@ export type ControlInput = {
   heatSetpointF?: number
   coolSetpointF?: number
   fanMode?: "ON" | "AUTO"
+  // How long to run the fan when fanMode is ON (Google caps a fan timer at 12 h).
+  fanMinutes?: number
 }
+
+// Google's limit for one fan timer.
+export const MAX_FAN_MINUTES = 720
+// Auto (HEATCOOL) needs the cool edge at least this far above the heat edge.
+const RANGE_MIN_GAP_F = 2
 
 // Apply a control change to the thermostat. Order matters: set the mode first
 // so setpoint commands are valid for the active mode.
@@ -344,12 +351,17 @@ export async function applyControl(accessToken: string, input: ControlInput): Pr
 
   const effectiveMode = input.mode ?? thermostat.mode
 
-  if (effectiveMode === "HEATCOOL" && input.heatSetpointF != null && input.coolSetpointF != null) {
+  if (effectiveMode === "HEATCOOL" && (input.heatSetpointF != null || input.coolSetpointF != null)) {
+    // Range mode always sends both edges. Fill a missing edge from the
+    // thermostat, then keep the cool edge at least 2°F above the heat edge.
+    const heat = input.heatSetpointF ?? thermostat.heatSetpointF ?? (input.coolSetpointF! - RANGE_MIN_GAP_F)
+    let cool = input.coolSetpointF ?? thermostat.coolSetpointF ?? heat + RANGE_MIN_GAP_F
+    if (cool < heat + RANGE_MIN_GAP_F) cool = heat + RANGE_MIN_GAP_F
     await executeCommand(
       accessToken,
       device,
       "sdm.devices.commands.ThermostatTemperatureSetpoint.SetRange",
-      { heatCelsius: fToC(input.heatSetpointF), coolCelsius: fToC(input.coolSetpointF) },
+      { heatCelsius: fToC(heat), coolCelsius: fToC(cool) },
     )
   } else if (effectiveMode === "HEAT" && input.heatSetpointF != null) {
     await executeCommand(
@@ -368,7 +380,7 @@ export async function applyControl(accessToken: string, input: ControlInput): Pr
   }
 
   if (input.fanMode) {
-    // AUTO turns the timer off; ON runs the fan on a standard 1h timer.
+    // AUTO turns the timer off; ON runs the fan for fanMinutes (default 1 h).
     if (input.fanMode === "AUTO") {
       await executeCommand(accessToken, device, "sdm.devices.commands.Fan.SetTimer", {
         timerMode: "OFF",
@@ -376,7 +388,7 @@ export async function applyControl(accessToken: string, input: ControlInput): Pr
     } else {
       await executeCommand(accessToken, device, "sdm.devices.commands.Fan.SetTimer", {
         timerMode: "ON",
-        duration: "3600s",
+        duration: `${Math.round(Math.min(MAX_FAN_MINUTES, Math.max(1, input.fanMinutes ?? 60)) * 60)}s`,
       })
     }
   }

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { comfortContext, loadComfortModel } from "@/lib/comfort/load"
 import { scoreAgainstBand } from "@/lib/comfort/model"
+import { MIN_BAND_F } from "@/lib/comfort/targets"
 
 export const dynamic = "force-dynamic"
 
@@ -149,7 +150,34 @@ export async function POST(request: Request) {
       if (!Number.isNaN(n)) update.min_comfort_temp_f = Math.min(78, Math.max(60, n))
     }
 
+    // Heat and cool targets (day + sleep). Cool must stay at least 2°F above
+    // heat so Auto changeover never has the system fighting itself.
+    for (const k of ["heat_target_f", "cool_target_f", "sleep_heat_target_f", "sleep_cool_target_f"]) {
+      if (k in body) {
+        const n = Number(body[k])
+        if (!Number.isNaN(n)) update[k] = Math.min(85, Math.max(50, Math.round(n)))
+      }
+    }
+
     const supabase = createAdminClient()
+    if (["heat_target_f", "cool_target_f", "sleep_heat_target_f", "sleep_cool_target_f"].some((k) => k in update)) {
+      const { data: cur } = await supabase.from("comfort_profile").select("*").eq("site_id", siteId).maybeSingle()
+      const merged = { ...(cur ?? {}), ...update } as Record<string, unknown>
+      const pairs: [string, string, string][] = [
+        ["heat_target_f", "cool_target_f", "Daytime"],
+        ["sleep_heat_target_f", "sleep_cool_target_f", "Sleep"],
+      ]
+      for (const [h, c, label] of pairs) {
+        const hv = merged[h] == null ? null : Number(merged[h])
+        const cv = merged[c] == null ? null : Number(merged[c])
+        if (hv != null && cv != null && cv < hv + MIN_BAND_F) {
+          return NextResponse.json(
+            { ok: false, error: `${label} cool target must be at least ${MIN_BAND_F}°F above the heat target.` },
+            { status: 400 },
+          )
+        }
+      }
+    }
     const { data, error } = await supabase
       .from("comfort_profile")
       .upsert(update, { onConflict: "site_id" })
