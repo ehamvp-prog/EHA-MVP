@@ -139,7 +139,10 @@ export async function GET(request: Request) {
       fit && dt != null ? Math.max(0, Math.min(1440, fit.slope * dt + fit.intercept)) : null
 
     // Typical indoor temp lately, for turning temperature differences into outdoor temps.
-    const recentIndoor = points.filter((p) => p.indoor != null).slice(-30)
+    // Taken from counted days so a different season's thermostat setting
+    // doesn't shift the line.
+    const countedIndoor = points.filter((p) => p.counted && p.indoor != null)
+    const recentIndoor = (countedIndoor.length ? countedIndoor : points.filter((p) => p.indoor != null)).slice(-30)
     const indoorAvg = recentIndoor.length ? recentIndoor.reduce((a, p) => a + p.indoor!, 0) / recentIndoor.length : null
     // Heat: outdoor = indoor − ΔT. Cool: outdoor = indoor + ΔT.
     const toOutdoor = (dt: number) => (indoorAvg == null ? null : mode === "heating" ? indoorAvg - dt : indoorAvg + dt)
