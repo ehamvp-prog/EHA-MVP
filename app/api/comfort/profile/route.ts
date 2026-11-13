@@ -159,7 +159,34 @@ export async function POST(request: Request) {
       }
     }
 
+    // Automation limits: the lowest / highest the app may ever set. At least
+    // 4°F apart so the heat and cool targets (2°F apart) always fit inside.
+    if ("auto_limit_min_f" in body) {
+      const n = Number(body.auto_limit_min_f)
+      if (!Number.isNaN(n)) update.auto_limit_min_f = Math.min(75, Math.max(50, Math.round(n)))
+    }
+    if ("auto_limit_max_f" in body) {
+      const n = Number(body.auto_limit_max_f)
+      if (!Number.isNaN(n)) update.auto_limit_max_f = Math.min(90, Math.max(60, Math.round(n)))
+    }
+    if ("dry_rewarm_enabled" in body) update.dry_rewarm_enabled = !!body.dry_rewarm_enabled
+    if ("dry_rewarm_drop_f" in body) {
+      const n = Number(body.dry_rewarm_drop_f)
+      if (!Number.isNaN(n)) update.dry_rewarm_drop_f = Math.min(4, Math.max(1, Math.round(n)))
+    }
+
     const supabase = createAdminClient()
+    if ("auto_limit_min_f" in update || "auto_limit_max_f" in update) {
+      const { data: cur } = await supabase.from("comfort_profile").select("auto_limit_min_f, auto_limit_max_f").eq("site_id", siteId).maybeSingle()
+      const lo = Number(update.auto_limit_min_f ?? cur?.auto_limit_min_f ?? 60)
+      const hi = Number(update.auto_limit_max_f ?? cur?.auto_limit_max_f ?? 80)
+      if (hi < lo + 4) {
+        return NextResponse.json(
+          { ok: false, error: "The highest limit must be at least 4°F above the lowest." },
+          { status: 400 },
+        )
+      }
+    }
     if (["heat_target_f", "cool_target_f", "sleep_heat_target_f", "sleep_cool_target_f"].some((k) => k in update)) {
       const { data: cur } = await supabase.from("comfort_profile").select("*").eq("site_id", siteId).maybeSingle()
       const merged = { ...(cur ?? {}), ...update } as Record<string, unknown>

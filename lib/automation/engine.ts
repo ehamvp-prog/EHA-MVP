@@ -233,6 +233,19 @@ async function maybeRecommend(db: Db, key: string, reason: string, before: Befor
   return true
 }
 
+// Was a recommendation with this key written within the window?
+async function recommendedWithin(db: Db, key: string, windowMs: number): Promise<boolean> {
+  const since = new Date(Date.now() - windowMs).toISOString()
+  const { data } = await db
+    .from("automation_journal")
+    .select("trigger_reason")
+    .eq("site_id", SITE_ID)
+    .eq("action_type", "recommendation")
+    .gte("occurred_at", since)
+    .limit(50)
+  return (data ?? []).some((r) => (r.trigger_reason ?? "").startsWith(`[${key}]`))
+}
+
 // Heartbeat — log a throttled "evaluation, no change needed" row so the
 // journal proves the cron engine is alive, without flooding every 5 min.
 async function maybeHeartbeat(db: Db, detail: string, before: BeforeState): Promise<boolean> {
@@ -365,10 +378,20 @@ export async function runAutomationTick(): Promise<TickResult> {
   // restrictive of the household comfort minimum and the equipment floor. The
   // old `auto_comfort_temp_min_f` (68) no longer gates downward commands; it
   // would silently block a legitimate 66°F setpoint.
-  const installerMax = Number(sys?.auto_comfort_temp_max_f ?? 78)
-  const comfortMinF = Number(comfortRaw.min_comfort_temp_f ?? COMFORT_MIN_FALLBACK_F)
+  //
+  // Automation limits (Heat & Cool card): the lowest and highest the app may
+  // EVER set, heat or cool. Every automation clamps to these. Rows saved before
+  // the limits existed fall back to the old comfort minimum / installer max.
+  // The AC edge additionally never goes below the equipment floor.
+  const installerMax = Number(comfortRaw.auto_limit_max_f ?? sys?.auto_comfort_temp_max_f ?? 78)
+  const comfortMinF = Number(comfortRaw.auto_limit_min_f ?? comfortRaw.min_comfort_temp_f ?? COMFORT_MIN_FALLBACK_F)
   const equipmentFloorF = Number(sys?.installer_min_f ?? EQUIPMENT_FLOOR_FALLBACK_F)
   const comfortFloor = Math.max(comfortMinF, equipmentFloorF)
+  // Dry-then-rewarm (Auto only): when the house is too humid and running the
+  // AC alone would make it cold, the AC dries the air down to the heat target
+  // while the heat edge sits a little lower as a backup.
+  const dryRewarmOn = comfortRaw.dry_rewarm_enabled !== false
+  const dryRewarmDropF = Math.min(4, Math.max(1, Number(comfortRaw.dry_rewarm_drop_f ?? 2)))
   // Peak coasting may run the fan, but never over a fan schedule the household chose.
   const fanEnabled = !!sys?.auto_comfort_fan_enabled && (sys?.fan_schedule ?? "auto") === "auto"
   const precoolOffset = Number(sys?.peak_dodger_precool_offset_f ?? 3)
@@ -594,7 +617,15 @@ export async function runAutomationTick(): Promise<TickResult> {
     const ownTargetF = heatingMode ? targets.heat : targets.cool
     const targetTempF = Math.min(healthMax ?? Infinity, Math.max(healthMin ?? -Infinity, ownTargetF))
     const targetRh = sel.targetRh
-    const tempError = realityTempF - targetTempF // >0 too warm
+    // In Auto the temperature is on target anywhere between the heat and cool
+    // numbers; it's only off by how far it sits outside that range.
+    const tempError = autoMode
+      ? realityTempF > targets.cool
+        ? realityTempF - targets.cool
+        : realityTempF < targets.heat
+          ? realityTempF - targets.heat
+          : 0
+      : realityTempF - targetTempF // >0 too warm
     const deadbandF = 1 + (mode === "savings" ? 1 : 0)
     let offNumber = Math.abs(gap) > tolerance || Math.abs(tempError) > deadbandF
 
@@ -650,8 +681,9 @@ export async function runAutomationTick(): Promise<TickResult> {
         : {}),
     }
 
-    const heatMin = Number(sys?.auto_heat_temp_min_f ?? 60)
-    const heatMax = Number(sys?.auto_heat_temp_max_f ?? 74)
+    // Heat obeys the same automation limits as cool.
+    const heatMin = comfortMinF
+    const heatMax = installerMax
     const supplyLimitF = Number(sys?.supply_limit_f ?? 160)
     const live = bundle?.computed
     const supplyHot =
@@ -717,26 +749,72 @@ export async function runAutomationTick(): Promise<TickResult> {
       if (heatEdge > curHeat && supplyHot) heatEdge = Math.round(curHeat)
       let coolEdge = clampSetpoint(targets.cool, comfortFloor, installerMax).value
       let overcool = false
-      if (humidityDominant && !hasDehumidifier && drying?.allowed) {
+      let dryRewarm = false
+      let stalled = false
+      if (humidityDominant && !hasDehumidifier && (drying?.allowed || dryRewarmOn)) {
         const overcoolStart = await overcoolStreakStartMs(db, nowMs)
         const overcoolTooLong = overcoolStart != null && nowMs - overcoolStart >= 90 * 60_000
-        if (!overcoolTooLong) {
+        // After 90 minutes of drying without reaching the humidity target,
+        // stop for 6 hours and flag it — something else is wrong.
+        stalled = overcoolTooLong || (await recommendedWithin(db, "humidity_stalled", 6 * 3600_000))
+        if (overcoolTooLong) {
+          await maybeRecommend(
+            db,
+            "humidity_stalled",
+            `Humidity stayed above ${Math.round(targetRh)}% after 90 minutes of drying. Stopping the drying for 6 hours. This points to airflow, refrigerant charge, or a moisture source in the house.`,
+            before,
+          )
+        }
+        if (!stalled && drying?.allowed) {
+          // Warm and humid outside: cool a little extra.
           const amount = Math.min(overcoolLimitF, (realityRh - targetRh) / 5)
           const dried = clampSetpoint(coolEdge - amount, comfortFloor, installerMax).value
           if (dried < coolEdge) {
             coolEdge = dried
             overcool = true
           }
+        } else if (!stalled && dryRewarmOn) {
+          // Cool or dry outside: the AC dries the air down to the heat target,
+          // and the heat edge sits dryRewarmDropF lower so the furnace catches
+          // the house before anyone gets cold. Both stay inside the limits.
+          const backup = clampSetpoint(heatEdge - dryRewarmDropF, heatMin, heatMax).value
+          const dryCool = clampSetpoint(backup + MIN_BAND_F, comfortFloor, installerMax).value
+          if (dryCool < coolEdge) {
+            heatEdge = backup
+            coolEdge = dryCool
+            dryRewarm = true
+            overcool = true // counts toward the 90-minute drying guard
+          }
         }
       }
       // The 2°F safety band always wins.
       if (coolEdge < heatEdge + MIN_BAND_F) coolEdge = heatEdge + MIN_BAND_F
 
-      const autoLog = { ...decisionLog, brain: "auto", heat_edge: heatEdge, cool_edge: coolEdge }
+      const autoLog = {
+        ...decisionLog,
+        brain: "auto",
+        heat_edge: heatEdge,
+        cool_edge: coolEdge,
+        dry_rewarm: dryRewarm,
+        limit_min_f: comfortMinF,
+        limit_max_f: installerMax,
+      }
+      const outsideNote =
+        drying?.outdoor_temp_f != null ? `, ${Math.round(drying.outdoor_temp_f)}°F outside` : ""
+      const freshAirNote =
+        drying?.outdoor_dew_f != null && drying.indoor_dew_f != null && drying.outdoor_dew_f < drying.indoor_dew_f
+          ? " Outside air is drier — opening windows would also work."
+          : ""
       const heatOk = Math.abs(heatEdge - curHeat) <= RESEND_THRESHOLD_F
       const coolOk = Math.abs(coolEdge - curCool) <= RESEND_THRESHOLD_F
       if (heatOk && coolOk) {
-        const why = humidityDominant && drying && !drying.allowed ? ` Humidity is high but ${drying.reason}.` : ""
+        const why = dryRewarm
+          ? ` Drying: AC cools to ${coolEdge}°F, heat backup at ${heatEdge}°F. Inside ${Math.round(realityRh)}% humidity (target ${Math.round(targetRh)}%)${outsideNote}.${freshAirNote}`
+          : humidityDominant && stalled
+            ? ` Humidity is high but drying is paused after 90 minutes without progress.`
+            : humidityDominant && drying && !drying.allowed
+              ? ` Humidity is high but ${drying.reason}.`
+              : ""
         await maybeHeartbeat(db, `Auto holding ${heatEdge}–${coolEdge}°F${inSleep ? " (sleep)" : ""}.${why}`, before)
         return { ran: false, action: null, detail: "auto range on target" }
       }
@@ -747,9 +825,11 @@ export async function runAutomationTick(): Promise<TickResult> {
       await applyControl(token!, { heatSetpointF: heatEdge, coolSetpointF: coolEdge })
       await insertJournal(db, {
         action_type: "comfort_adjust",
-        trigger_reason: `Auto range ${Math.round(curHeat)}–${Math.round(curCool)}→${heatEdge}–${coolEdge}°F (heat to ${heatEdge}, cool to ${coolEdge}${inSleep ? ", sleep" : ""}; indoor ${Math.round(realityTempF)}°F)${
-          overcool ? ` — cool edge lowered to pull humidity ${Math.round(realityRh)}% down` : ""
-        }${heatEdge < heatClamp.value ? " — heat held, supply air running hot" : ""}.`,
+        trigger_reason: dryRewarm
+          ? `Drying: AC cools to ${coolEdge}°F, heat backup at ${heatEdge}°F. Inside ${Math.round(realityTempF)}°F and ${Math.round(realityRh)}% humidity (target ${Math.round(targetRh)}%)${outsideNote}. Running the AC alone would make the house cold, so the heat is set ${dryRewarmDropF}°F under your ${heatClamp.value}°F heat target as a backup.${freshAirNote}`
+          : `Auto range ${Math.round(curHeat)}–${Math.round(curCool)}→${heatEdge}–${coolEdge}°F (heat to ${heatEdge}, cool to ${coolEdge}${inSleep ? ", sleep" : ""}; indoor ${Math.round(realityTempF)}°F)${
+              overcool ? ` — cool edge lowered to pull humidity ${Math.round(realityRh)}% down` : ""
+            }${heatEdge < heatClamp.value && !dryRewarm ? " — heat held, supply air running hot" : ""}.`,
         command_sent: { heatSetpoint: heatEdge, coolSetpoint: coolEdge, ...(overcool ? { overcool: true } : {}), ...autoLog },
         nest_confirmed: null,
         before_state: { ...before, setpoint_f: curCool },
