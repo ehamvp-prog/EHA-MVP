@@ -29,6 +29,7 @@ type Resp = {
   yesterday: { day: string; actual: number; expected: number | null; pct: number | null; outdoor: number | null; indoor: number | null } | null
   last7: { days: number; actual: number; expected: number | null; pct: number | null }
   heat_per_min: { recent_btu: number | null; avg_btu: number | null } | null
+  learning_reason: "few_days" | "inconsistent" | null
 }
 
 function hm(min: number | null | undefined) {
@@ -85,10 +86,14 @@ export function WeatherLoadCard({ mode }: { mode: "heating" | "cooling" }) {
       {!data ? (
         <p className="py-6 text-center text-sm text-muted">Loading…</p>
       ) : data.status === "learning" ? (
-        <p className="rounded-xl border border-border bg-elevated px-3 py-4 text-center text-sm text-muted text-pretty">
-          Learning your house — {data.run_days} of {data.min_days} days with {sys} run time so far. Once it has a week,
-          it can tell you whether the {sys} ran longer than it should have for the weather.
-        </p>
+        <>
+          <p className="rounded-xl border border-border bg-elevated px-3 py-4 text-center text-sm text-muted text-pretty">
+            {data.learning_reason === "inconsistent"
+              ? `Learning your house — ${data.run_days} days with ${sys} run time so far, but they don't line up with the weather yet (thermostat changes and mild days mix it up). It needs more steady ${mode === "heating" ? "cold" : "hot"} days before it can say what's normal.`
+              : `Learning your house — ${data.run_days} of ${data.min_days} days with ${sys} run time so far. Once it has a week, it can tell you whether the ${sys} ran longer than it should have for the weather.`}
+          </p>
+          <ScatterChart data={data} accent={accent} />
+        </>
       ) : (
         <>
           {y ? (
@@ -170,7 +175,10 @@ function Stat({ label, value, sub }: { label: string; value: string; sub: string
 // Dots = days (x: temperature difference, y: minutes run). Line = the fit.
 // Last 7 days are colored; yesterday is the big dot.
 function ScatterChart({ data, accent }: { data: Resp; accent: string }) {
-  const pts = data.points.filter((p) => p.complete && p.deltaT != null)
+  // Heat: only days colder outside than in. Cool: only days with run time or warmer outside.
+  const pts = data.points.filter(
+    (p) => p.complete && p.deltaT != null && (data.mode === "heating" ? p.deltaT > 0 : p.run > 0 || p.deltaT > 0),
+  )
   if (pts.length < 2) return null
   const W = 340
   const H = 190
