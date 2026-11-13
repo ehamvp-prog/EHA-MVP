@@ -12,6 +12,7 @@ import {
   type NestThermostat,
 } from "@/lib/nest/client"
 import { clampSetpoint } from "@/lib/comfort/ring"
+import { acDryingCheck, modeTargets, MIN_BAND_F, type DryingCheck } from "@/lib/comfort/targets"
 import { comfortContext, deriveBandCached } from "@/lib/comfort/load"
 import {
   scoreAgainstBand,
@@ -195,6 +196,21 @@ async function overcoolStreakStartMs(db: Db, nowMs: number): Promise<number | nu
   return streakStart
 }
 
+// Latest outdoor temperature + humidity (within the last 3 hours).
+async function latestOutdoor(db: Db): Promise<{ tempF: number | null; rh: number | null }> {
+  const since = new Date(Date.now() - 3 * 3600_000).toISOString()
+  const { data } = await db
+    .from("weather_observations")
+    .select("outdoor_temp_f, outdoor_rh")
+    .gte("hour_utc", since)
+    .not("outdoor_temp_f", "is", null)
+    .order("hour_utc", { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  const n = (v: unknown) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v))
+  return { tempF: n(data?.outdoor_temp_f), rh: n(data?.outdoor_rh) }
+}
+
 // Throttle recommendations so we don't spam the journal each tick.
 async function maybeRecommend(db: Db, key: string, reason: string, before: BeforeState): Promise<boolean> {
   const since = new Date(Date.now() - RECO_COOLDOWN_MS).toISOString()
@@ -353,7 +369,8 @@ export async function runAutomationTick(): Promise<TickResult> {
   const comfortMinF = Number(comfortRaw.min_comfort_temp_f ?? COMFORT_MIN_FALLBACK_F)
   const equipmentFloorF = Number(sys?.installer_min_f ?? EQUIPMENT_FLOOR_FALLBACK_F)
   const comfortFloor = Math.max(comfortMinF, equipmentFloorF)
-  const fanEnabled = !!sys?.auto_comfort_fan_enabled
+  // Peak coasting may run the fan, but never over a fan schedule the household chose.
+  const fanEnabled = !!sys?.auto_comfort_fan_enabled && (sys?.fan_schedule ?? "auto") === "auto"
   const precoolOffset = Number(sys?.peak_dodger_precool_offset_f ?? 3)
   const coastOffset = Number(sys?.peak_dodger_coast_offset_f ?? 3)
 
@@ -363,7 +380,6 @@ export async function runAutomationTick(): Promise<TickResult> {
   const sleepEnabled = comfortRaw.sleep_enabled !== false
   const sleepStart = String(comfortRaw.sleep_start ?? "22:00").slice(0, 5)
   const sleepEnd = String(comfortRaw.sleep_end ?? "06:00").slice(0, 5)
-  const sleepTargetF = Number(comfortRaw.sleep_target_f ?? comfortRaw.preferred_temp_f ?? 68)
 
   // Humidity capability (spec v2.3 §6.2.1).
   const hasDehumidifier = !!sys?.has_dehumidifier
@@ -400,6 +416,15 @@ export async function runAutomationTick(): Promise<TickResult> {
   // Happy Number and the Comfort Score are measured against, so the number
   // stays comparable across the whole day. HUNT folds in the 22:00-06:00 sleep
   // overlay so the engine aims at the narrowed night band during those hours.
+  // Which brain is in charge comes straight from the thermostat mode:
+  //   HEAT     heating brain (heat target)
+  //   COOL     cooling brain (cool target)
+  //   HEATCOOL Auto — the Nest changes over between the heat and cool targets
+  //            on its own; the app keeps both edges on target, 2°F+ apart.
+  const coolingMode = thermostat?.mode === "COOL"
+  const heatingMode = thermostat?.mode === "HEAT"
+  const autoMode = thermostat?.mode === "HEATCOOL"
+
   const blowerOn = thermostat?.fanMode === "ON" || thermostat?.hvacStatus === "COOLING"
   const huntCtx = comfortContext({
     blowerOn,
@@ -411,8 +436,11 @@ export async function runAutomationTick(): Promise<TickResult> {
   // so the hunt band (and therefore its Happy Number) is recomputed AT the sleep
   // target (spec v2.3 §8.2) — the comparison and the drive-to stay consistent.
   const inSleep = huntCtx.night
-  const huntInputs: ModelInputs = inSleep ? { ...inputs, preferred_temp_f: sleepTargetF } : inputs
-  const huntBand = inSleep ? deriveBandCached(huntInputs, huntCtx) : baseBand
+  // Heat and cool targets for right now (day or sleep pair, 2°F+ apart).
+  const targets = modeTargets(comfortRaw as Record<string, unknown>, !!(sleepEnabled && inSleep))
+  // The hunt aims at the active brain's target: heat in Heat, cool otherwise.
+  const huntInputs: ModelInputs = { ...inputs, preferred_temp_f: heatingMode ? targets.heat : targets.cool }
+  const huntBand = deriveBandCached(huntInputs, huntCtx)
 
   // Always try to confirm a pending command, even if we take no new action.
   await confirmPending(db, thermostat, inputs, baseBand, baseCtx)
@@ -451,14 +479,8 @@ export async function runAutomationTick(): Promise<TickResult> {
   const season = seasonForMonth(parts.month)
   const isWeekday = parts.weekday >= 1 && parts.weekday <= 5
   const holiday = isRtouHoliday(parts)
-  // Which brain is in charge. In HEATCOOL the detected season decides, so the
-  // cooling brain never runs the AC to hit a target in winter and the heating
-  // brain never fires the furnace in summer.
-  const detectedSeason = bundle?.computed.season_mode ?? null
-  const coolingMode =
-    thermostat?.mode === "COOL" || (thermostat?.mode === "HEATCOOL" && detectedSeason !== "heating")
-  const heatingMode =
-    thermostat?.mode === "HEAT" || (thermostat?.mode === "HEATCOOL" && detectedSeason === "heating")
+  // Peak dodging moves the cool setpoint, which exists in Cool and in Auto.
+  const coolEdgeMode = coolingMode || autoMode
 
   // ---- Automation 2: Peak Dodger (time-critical, evaluated first) ----------
   // Balanced coasts only within the band: cap the warm-side setpoint at the
@@ -468,7 +490,7 @@ export async function runAutomationTick(): Promise<TickResult> {
   if (peakAllowed && season === "summer" && isWeekday && !holiday) {
     // Pre-cool window: 2–4 PM CST (before the 4–8 PM peak).
     if (parts.hour >= 14 && parts.hour < 16) {
-      if (nestConnected && coolingMode && thermostat?.coolSetpointF != null) {
+      if (nestConnected && coolEdgeMode && thermostat?.coolSetpointF != null) {
         if (!inCooldown && !(await didActionToday(db, "peak_precool", nowMs))) {
           // §8.2a: precool clamps to the SAME comfort_floor as everything else —
           // no separate hardcoded floor in the peak path.
@@ -498,7 +520,7 @@ export async function runAutomationTick(): Promise<TickResult> {
     }
     // Coast window: 4–8 PM CST peak.
     else if (touPeriodFor(parts) === "on_peak") {
-      if (nestConnected && coolingMode && thermostat?.coolSetpointF != null) {
+      if (nestConnected && coolEdgeMode && thermostat?.coolSetpointF != null) {
         if (!inCooldown && !(await didActionToday(db, "peak_coast", nowMs))) {
           const clamp = clampSetpoint(thermostat.coolSetpointF + coastOffset, comfortFloor, coastMaxF)
           // Balanced: if we're already at the band's warm edge, coasting further
@@ -545,7 +567,7 @@ export async function runAutomationTick(): Promise<TickResult> {
   // compresses under tolerance can never be stranded off its target.
   if (comfortAllowed) {
     // §7 offline guard: Nest connected but no setpoint = thermostat offline.
-    if (nestConnected && coolingMode && thermostat?.coolSetpointF == null) {
+    if (nestConnected && coolEdgeMode && thermostat?.coolSetpointF == null) {
       await maybeHeartbeat(db, "thermostat offline, cannot evaluate", before)
       return { ran: false, action: null, detail: "thermostat offline, cannot evaluate" }
     }
@@ -576,6 +598,20 @@ export async function runAutomationTick(): Promise<TickResult> {
     const humidityDominant = rhOff > tempOff && realityRh > targetRh
     const dominantFactor = humidityDominant ? "humidity" : "temperature"
 
+    // Is running the AC extra to dry the air OK right now? Only when it's warm
+    // outside AND the outside air is at least as wet as inside. Otherwise the
+    // AC would just make the house cold (fresh air fixes that humidity).
+    const outdoor = humidityDominant ? await latestOutdoor(db) : { tempF: null, rh: null }
+    const drying: DryingCheck | null = humidityDominant
+      ? acDryingCheck({
+          indoorTempF: realityTempF,
+          indoorRh: realityRh,
+          outdoorTempF: outdoor.tempF,
+          outdoorRh: outdoor.rh,
+          coolTargetF: targets.cool,
+        })
+      : null
+
     // §6.5 journal payload — the same fields every tick so a wrong target is
     // visible immediately.
     const decisionLog = {
@@ -588,7 +624,25 @@ export async function runAutomationTick(): Promise<TickResult> {
       temp_error: Math.round(tempError),
       binding_constraint: sel.tempClampedBy ?? sel.rhClampedBy ?? null,
       sleep: inSleep,
+      heat_target: targets.heat,
+      cool_target: targets.cool,
+      ...(drying
+        ? {
+            ac_drying_allowed: drying.allowed,
+            ac_drying_reason: drying.reason,
+            indoor_dew_f: drying.indoor_dew_f,
+            outdoor_dew_f: drying.outdoor_dew_f,
+            outdoor_temp_f: drying.outdoor_temp_f,
+          }
+        : {}),
     }
+
+    const heatMin = Number(sys?.auto_heat_temp_min_f ?? 60)
+    const heatMax = Number(sys?.auto_heat_temp_max_f ?? 74)
+    const supplyLimitF = Number(sys?.supply_limit_f ?? 160)
+    const live = bundle?.computed
+    const supplyHot =
+      live?.rise_verdict === "high" || (live?.supply_temp_f != null && live.supply_temp_f >= supplyLimitF)
 
     // ---- HEATING (gas furnace): comfort only --------------------------------
     // Gas has no peak hours (Kansas Gas Service bills monthly volume at one
@@ -600,10 +654,7 @@ export async function runAutomationTick(): Promise<TickResult> {
     // relaxed. The thermostat itself holds the temperature between ticks.
     if (nestConnected && heatingMode && thermostat?.heatSetpointF != null) {
       const setpoint = thermostat.heatSetpointF
-      const heatMin = Number(sys?.auto_heat_temp_min_f ?? 60)
-      const heatMax = Number(sys?.auto_heat_temp_max_f ?? 74)
-      const supplyLimitF = Number(sys?.supply_limit_f ?? 160)
-      const heatTargetF = inSleep ? sleepTargetF : inputs.preferred_temp_f
+      const heatTargetF = targets.heat
       const clamp = clampSetpoint(heatTargetF, heatMin, heatMax)
       const heatLog = { ...decisionLog, target: clamp.value, brain: "heating" }
 
@@ -614,9 +665,6 @@ export async function runAutomationTick(): Promise<TickResult> {
 
       // Never push MORE heat through a furnace that's already running hot:
       // a high rise or a supply near the limit means restricted airflow.
-      const live = bundle?.computed
-      const supplyHot =
-        live?.rise_verdict === "high" || (live?.supply_temp_f != null && live.supply_temp_f >= supplyLimitF)
       if (clamp.value > setpoint && supplyHot) {
         const wrote = await maybeRecommend(
           db,
@@ -632,13 +680,7 @@ export async function runAutomationTick(): Promise<TickResult> {
         return { ran: false, action: null, detail: "cooldown" }
       }
 
-      if (thermostat.mode === "HEATCOOL") {
-        // Range mode needs both edges; keep the cool edge at least 3°F above.
-        const coolEdge = Math.max(thermostat.coolSetpointF ?? clamp.value + 3, clamp.value + 3)
-        await applyControl(token!, { heatSetpointF: clamp.value, coolSetpointF: coolEdge })
-      } else {
-        await applyControl(token!, { heatSetpointF: clamp.value })
-      }
+      await applyControl(token!, { heatSetpointF: clamp.value })
       await insertJournal(db, {
         action_type: "comfort_adjust",
         trigger_reason: `Heat setpoint ${Math.round(setpoint)}→${clamp.value}°F to hold your ${inSleep ? "sleep " : ""}target (indoor ${Math.round(realityTempF)}°F)${clamp.clamped ? ` — held at the ${clamp.value}°F heating ${clamp.reason === "above_max" ? "ceiling" : "floor"}` : ""}.`,
@@ -650,12 +692,67 @@ export async function runAutomationTick(): Promise<TickResult> {
       return { ran: true, action: "comfort_adjust" }
     }
 
+    // ---- AUTO (HEATCOOL): changeover between the heat and cool targets ---------
+    // The Nest itself decides when to heat and when to cool. The app keeps the
+    // two edges on the household's heat and cool targets, always 2°F+ apart.
+    if (nestConnected && autoMode && thermostat?.heatSetpointF != null && thermostat?.coolSetpointF != null) {
+      const curHeat = thermostat.heatSetpointF
+      const curCool = thermostat.coolSetpointF
+      const heatClamp = clampSetpoint(targets.heat, heatMin, heatMax)
+      let heatEdge = heatClamp.value
+      // Don't raise heat through a furnace that's already running hot.
+      if (heatEdge > curHeat && supplyHot) heatEdge = Math.round(curHeat)
+      let coolEdge = clampSetpoint(targets.cool, comfortFloor, installerMax).value
+      let overcool = false
+      if (humidityDominant && !hasDehumidifier && drying?.allowed) {
+        const overcoolStart = await overcoolStreakStartMs(db, nowMs)
+        const overcoolTooLong = overcoolStart != null && nowMs - overcoolStart >= 90 * 60_000
+        if (!overcoolTooLong) {
+          const amount = Math.min(overcoolLimitF, (realityRh - targetRh) / 5)
+          const dried = clampSetpoint(coolEdge - amount, comfortFloor, installerMax).value
+          if (dried < coolEdge) {
+            coolEdge = dried
+            overcool = true
+          }
+        }
+      }
+      // The 2°F safety band always wins.
+      if (coolEdge < heatEdge + MIN_BAND_F) coolEdge = heatEdge + MIN_BAND_F
+
+      const autoLog = { ...decisionLog, brain: "auto", heat_edge: heatEdge, cool_edge: coolEdge }
+      const heatOk = Math.abs(heatEdge - curHeat) <= RESEND_THRESHOLD_F
+      const coolOk = Math.abs(coolEdge - curCool) <= RESEND_THRESHOLD_F
+      if (heatOk && coolOk) {
+        const why = humidityDominant && drying && !drying.allowed ? ` Humidity is high but ${drying.reason}.` : ""
+        await maybeHeartbeat(db, `Auto holding ${heatEdge}–${coolEdge}°F${inSleep ? " (sleep)" : ""}.${why}`, before)
+        return { ran: false, action: null, detail: "auto range on target" }
+      }
+      if (inCooldown) {
+        await maybeHeartbeat(db, "in actuation cooldown (auto)", before)
+        return { ran: false, action: null, detail: "cooldown" }
+      }
+      await applyControl(token!, { heatSetpointF: heatEdge, coolSetpointF: coolEdge })
+      await insertJournal(db, {
+        action_type: "comfort_adjust",
+        trigger_reason: `Auto range ${Math.round(curHeat)}–${Math.round(curCool)}→${heatEdge}–${coolEdge}°F (heat to ${heatEdge}, cool to ${coolEdge}${inSleep ? ", sleep" : ""}; indoor ${Math.round(realityTempF)}°F)${
+          overcool ? ` — cool edge lowered to pull humidity ${Math.round(realityRh)}% down` : ""
+        }${heatEdge < heatClamp.value ? " — heat held, supply air running hot" : ""}.`,
+        command_sent: { heatSetpoint: heatEdge, coolSetpoint: coolEdge, ...(overcool ? { overcool: true } : {}), ...autoLog },
+        nest_confirmed: null,
+        before_state: { ...before, setpoint_f: curCool },
+        est_savings_usd: 0,
+      })
+      return { ran: true, action: "comfort_adjust" }
+    }
+
     if (nestConnected && coolingMode && thermostat?.coolSetpointF != null) {
       const setpoint = thermostat.coolSetpointF
 
       if (!inCooldown && offNumber) {
         // ---- Humidity is the dominant deficit (§6.2.1) --------------------
-        if (humidityDominant) {
+        // A dehumidifier can always run. Overcooling with the AC only when the
+        // drying check says it won't just make the house cold.
+        if (humidityDominant && (hasDehumidifier || drying?.allowed)) {
           if (hasDehumidifier) {
             // Dedicated dehumidifier: run it, setpoint untouched. (No Nest
             // actuator for this in the current integration — journal the intent.)
@@ -710,7 +807,8 @@ export async function runAutomationTick(): Promise<TickResult> {
         // ---- Temperature is dominant: direct-set the target (§6.3) ---------
         const clamp = clampSetpoint(targetTempF, comfortFloor, installerMax)
         if (Math.abs(clamp.value - setpoint) <= RESEND_THRESHOLD_F) {
-          await maybeHeartbeat(db, `already at ${clamp.value}°F target, no re-send`, before)
+          const why = humidityDominant && drying && !drying.allowed ? ` Humidity is high but ${drying.reason}.` : ""
+          await maybeHeartbeat(db, `already at ${clamp.value}°F target, no re-send.${why}`, before)
           return { ran: false, action: null, detail: "already at target" }
         }
         const clampNote = clamp.clamped
