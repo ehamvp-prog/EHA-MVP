@@ -25,6 +25,9 @@ const MIN_HOURS = 20
 // Below this many running days the line is "still learning".
 const MIN_DAYS = 7
 const RELIABLE_DAYS = 14
+// A line that explains less than this much of the day-to-day swing isn't a
+// fingerprint yet (mixed modes, thermostat changes, too few cold days).
+const MIN_R2 = 0.4
 
 type Row = {
   day_local: string
@@ -39,6 +42,8 @@ type Row = {
 
 const num = (v: unknown): number | null => (v == null || !Number.isFinite(Number(v)) ? null : Number(v))
 const r1 = (v: number | null) => (v == null || !Number.isFinite(v) ? null : Math.round(v * 10) / 10)
+// Outdoor temps outside this range mean the line is being stretched too far.
+const plausible = (v: number | null) => (v == null || v < -30 || v > 120 ? null : r1(v))
 
 function fitLine(pts: { x: number; y: number }[]) {
   const n = pts.length
@@ -91,9 +96,11 @@ export async function GET(request: Request) {
 
     // Fit only finished, well-covered days where the system actually ran.
     const fitPts = points.filter((p) => p.complete && p.run > 0 && p.deltaT != null).map((p) => ({ x: p.deltaT!, y: p.run }))
-    const fit = fitLine(fitPts)
+    const rawFit = fitLine(fitPts)
     const runDays = fitPts.length
-    const status = runDays < MIN_DAYS ? "learning" : runDays < RELIABLE_DAYS ? "early" : "reliable"
+    // Only trust a line that slopes the right way and actually fits the days.
+    const fit = rawFit && rawFit.slope > 0 && rawFit.r2 >= MIN_R2 && runDays >= MIN_DAYS ? rawFit : null
+    const status = !fit ? "learning" : runDays < RELIABLE_DAYS ? "early" : "reliable"
 
     const expected = (dt: number | null) =>
       fit && dt != null ? Math.max(0, Math.min(1440, fit.slope * dt + fit.intercept)) : null
@@ -103,7 +110,7 @@ export async function GET(request: Request) {
     const indoorAvg = recentIndoor.length ? recentIndoor.reduce((a, p) => a + p.indoor!, 0) / recentIndoor.length : null
     // Heat: outdoor = indoor − ΔT. Cool: outdoor = indoor + ΔT.
     const toOutdoor = (dt: number) => (indoorAvg == null ? null : mode === "heating" ? indoorAvg - dt : indoorAvg + dt)
-    const usableFit = fit && fit.slope > 0
+    const usableFit = fit != null
     const noRunDelta = usableFit ? -fit!.intercept / fit!.slope : null
     const nonstopDelta = usableFit ? (1440 - fit!.intercept) / fit!.slope : null
 
@@ -135,8 +142,15 @@ export async function GET(request: Request) {
         ? { slope: r1(fit.slope), intercept: r1(fit.intercept), r2: Math.round(fit.r2 * 100) / 100, n: fit.n }
         : null,
       indoor_avg_f: r1(indoorAvg),
-      no_run_outdoor_f: noRunDelta != null ? r1(toOutdoor(noRunDelta)) : null,
-      nonstop_outdoor_f: nonstopDelta != null ? r1(toOutdoor(nonstopDelta)) : null,
+      no_run_outdoor_f: noRunDelta != null ? plausible(toOutdoor(noRunDelta)) : null,
+      nonstop_outdoor_f: nonstopDelta != null ? plausible(toOutdoor(nonstopDelta)) : null,
+      // Why it's still learning, in plain words.
+      learning_reason: fit
+        ? null
+        : runDays < MIN_DAYS
+          ? "few_days"
+          : "inconsistent",
+      fit_r2_raw: rawFit ? Math.round(rawFit.r2 * 100) / 100 : null,
       yesterday: yesterday
         ? {
             day: yesterday.day,
