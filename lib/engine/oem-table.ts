@@ -59,10 +59,40 @@ export interface OemAirflow {
 
 const norm = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, "")
 
-/** Model numbers on the label vs chart prefixes: compare letters/digits only. */
+/**
+ * Model numbers on the label vs chart patterns: compare letters/digits only.
+ * A plain pattern is a prefix ("58STA090-14" matches "58STA090-14116").
+ * A "*" inside the pattern skips the part of the label that varies between
+ * production runs ("58MVC080*14" matches "58MVC080-F-10114"): the pieces must
+ * appear in order, and the last piece must end the label unless the pattern
+ * itself ends with "*".
+ */
 export function chartMatchesModel(modelPattern: string, model: string): boolean {
-  const p = norm(modelPattern)
-  return p.length > 0 && norm(model).startsWith(p)
+  const m = norm(model)
+  if (!modelPattern.slice(0, -1).includes("*")) {
+    const p = norm(modelPattern)
+    return p.length > 0 && m.startsWith(p)
+  }
+  const open = modelPattern.trimEnd().endsWith("*")
+  const parts = modelPattern.split("*").map(norm)
+  if (!parts[0] || !m.startsWith(parts[0])) return false
+  let at = parts[0].length
+  const rest = parts.slice(1).filter((x) => x.length > 0)
+  for (let i = 0; i < rest.length; i++) {
+    const last = i === rest.length - 1
+    if (last && !open) {
+      return m.length - rest[i].length >= at && m.endsWith(rest[i])
+    }
+    const j = m.indexOf(rest[i], at)
+    if (j < 0) return false
+    at = j + rest[i].length
+  }
+  return true
+}
+
+/** How specific a pattern is (letters/digits it pins down), for "most specific wins". */
+export function patternSpecificity(modelPattern: string): number {
+  return norm(modelPattern.replace(/\*/g, "")).length
 }
 
 export function chartTaps(chart: OemChart): string[] {
