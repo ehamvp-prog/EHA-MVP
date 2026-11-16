@@ -6,7 +6,7 @@
 // =====================================================================
 
 import type { SupabaseClient } from "@supabase/supabase-js"
-import { chartMatchesModel, type OemChart } from "@/lib/engine/oem-table"
+import { chartMatchesModel, patternSpecificity, type OemChart } from "@/lib/engine/oem-table"
 
 const TTL_MS = 10 * 60 * 1000
 const cache = new Map<string, { at: number; chart: OemChart | null }>()
@@ -24,7 +24,7 @@ export async function loadOemChart(
   const hit = cache.get(key)
   if (hit && Date.now() - hit.at < TTL_MS) return hit.chart
 
-  // Narrow by the first 4 characters, then pick the longest prefix match.
+  // Narrow by the first 4 characters, then pick the most specific match.
   const head = norm(model).slice(0, 4)
   let q = supabase
     .from("blower_charts")
@@ -41,7 +41,7 @@ export async function loadOemChart(
   const best = charts
     .filter((c) => chartMatchesModel(String(c.model_pattern), model))
     .sort((a, b) => {
-      const byLen = norm(String(b.model_pattern)).length - norm(String(a.model_pattern)).length
+      const byLen = patternSpecificity(String(b.model_pattern)) - patternSpecificity(String(a.model_pattern))
       if (byLen) return byLen
       return (a.variant === "" ? 0 : 1) - (b.variant === "" ? 0 : 1)
     })[0]
