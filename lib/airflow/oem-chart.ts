@@ -6,7 +6,7 @@
 // =====================================================================
 
 import type { SupabaseClient } from "@supabase/supabase-js"
-import { chartMatchesModel, patternSpecificity, type OemChart } from "@/lib/engine/oem-table"
+import { chartMatchesModel, nearRevisionScore, patternSpecificity, type OemChart } from "@/lib/engine/oem-table"
 
 const TTL_MS = 10 * 60 * 1000
 const cache = new Map<string, { at: number; chart: OemChart | null }>()
@@ -38,13 +38,25 @@ export async function loadOemChart(
     cache.set(key, { at: Date.now(), chart: null })
     return null
   }
-  const best = charts
+  const usable = charts.filter((c) => !String(c.variant ?? "").startsWith("quarantine"))
+  const byVariant = (a: { variant?: unknown }, b: { variant?: unknown }) =>
+    (a.variant === "" ? 0 : 1) - (b.variant === "" ? 0 : 1)
+  let nearRevision = false
+  let best = usable
     .filter((c) => chartMatchesModel(String(c.model_pattern), model))
     .sort((a, b) => {
       const byLen = patternSpecificity(String(b.model_pattern)) - patternSpecificity(String(a.model_pattern))
       if (byLen) return byLen
-      return (a.variant === "" ? 0 : 1) - (b.variant === "" ? 0 : 1)
+      return byVariant(a, b)
     })[0]
+  if (!best) {
+    // No exact match: use the same model's closest revision, flagged lower accuracy.
+    best = usable
+      .map((c) => ({ c, s: nearRevisionScore(String(c.model_pattern), model) }))
+      .filter((x) => x.s > 0)
+      .sort((a, b) => b.s - a.s || byVariant(a.c, b.c))[0]?.c
+    nearRevision = !!best
+  }
   if (!best) {
     cache.set(key, { at: Date.now(), chart: null })
     return null
@@ -76,6 +88,7 @@ export async function loadOemChart(
     defaultTaps: (best.default_taps as Record<string, string> | null) ?? null,
     hasWatts: points.some((p) => p.watts != null),
     sourceUrl: String(best.source_url),
+    nearRevision,
     points,
     ratings: {
       inputBtuh: num(best.input_btuh),

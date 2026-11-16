@@ -207,7 +207,7 @@ export function deriveAirflow(input: AirflowInputs): AirflowResult {
     if (r && !skip) {
       const chart = input.oemChart
       const lowerAccuracy =
-        r.tapSource === "factory_default" || r.outsideChart || !chart.checked || r.enteredTapUnmatched
+        r.tapSource === "factory_default" || r.outsideChart || !chart.checked || r.enteredTapUnmatched || !!chart.nearRevision
       const bits = [
         `${chart.brand} ${chart.family ?? chart.modelPattern} blower chart`,
         `${r.tap} (${tapSourceLabel(r.tapSource)})`,
@@ -215,6 +215,7 @@ export function deriveAirflow(input: AirflowInputs): AirflowResult {
       ]
       if (r.outsideChart) bits.push(`static is past the chart, edge value used`)
       if (!chart.checked) bits.push("chart not yet double-checked")
+      if (chart.nearRevision) bits.push(`no chart for this exact revision; closest one (${chart.modelPattern}) used`)
       if (r.enteredTapUnmatched) bits.push(`entered tap isn't printed on this chart (different motor revision?)`)
       return {
         cfm: r.cfm,
