@@ -33,6 +33,9 @@ export interface OemChart {
   defaultTaps: Record<string, string> | null
   hasWatts: boolean
   sourceUrl: string
+  // Set when no chart matched the label exactly and the closest revision of
+  // the same model was used (only the trailing revision letters differ).
+  nearRevision?: boolean
   points: OemPoint[]
   // Manufacturer ratings printed with the chart (furnaces), when stored.
   ratings?: {
@@ -88,6 +91,25 @@ export function chartMatchesModel(modelPattern: string, model: string): boolean 
     at = j + rest[i].length
   }
   return true
+}
+
+/**
+ * Fallback when nothing matches: the same model with a different trailing
+ * revision letter or two (e.g. chart S9V2B080U4VSBB vs label S9V2B080U4VSBA).
+ * Returns how many leading letters/digits agree, or 0 when it isn't a
+ * near-revision (only plain patterns; the part that differs must be letters,
+ * at most 2 of them, and at least 8 characters must agree).
+ */
+export function nearRevisionScore(modelPattern: string, model: string): number {
+  if (modelPattern.slice(0, -1).includes("*")) return 0
+  const p = norm(modelPattern)
+  const m = norm(model)
+  let i = 0
+  while (i < p.length && i < m.length && p[i] === m[i]) i++
+  if (i === p.length) return 0 // that's a real match, handled elsewhere
+  const diff = p.slice(i)
+  if (i < 8 || diff.length > 2 || !/^[A-Z]+$/.test(diff)) return 0
+  return i
 }
 
 /** How specific a pattern is (letters/digits it pins down), for "most specific wins". */
